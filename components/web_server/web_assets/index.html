@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>簡訊轉發配置</title>
+  <style>
+    :root {
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #10b981;
+      --danger: #ef4444;
+      --danger-hover: #dc2626;
+      --warning: #f59e0b;
+      --bg-color: #f3f4f6;
+      --card-bg: #ffffff;
+      --text-main: #1f2937;
+      --text-muted: #6b7280;
+      --border-color: #e5e7eb;
+      --input-bg: #f9fafb;
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
+      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      line-height: 1.5;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      background: var(--card-bg);
+      padding: 30px;
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-lg);
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 25px;
+      letter-spacing: -0.5px;
+    }
+
+    /* 頂部導航 */
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 25px;
+      background: var(--bg-color);
+      padding: 8px;
+      border-radius: var(--radius-md);
+    }
+
+    .nav a {
+      flex: 1;
+      text-align: center;
+      padding: 12px 15px;
+      background: transparent;
+      border-radius: var(--radius-sm);
+      text-decoration: none;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 14px;
+      transition: all 0.2s ease;
+    }
+
+    .nav a:hover {
+      background: #e5e7eb;
+      color: var(--text-main);
+    }
+
+    .nav a.active {
+      background: var(--card-bg);
+      color: var(--primary);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .nav a.logout {
+      color: var(--danger);
+      flex: 0.3;
+    }
+    .nav a.logout:hover {
+      background: var(--danger);
+      color: white;
+    }
+
+    /* 提示與狀態條 */
+    .status, .warning {
+      padding: 14px 18px;
+      border-radius: var(--radius-sm);
+      margin-bottom: 20px;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .status {
+      background: #eff6ff;
+      color: #1e3a8a;
+      border-left: 4px solid var(--primary);
+    }
+
+    .warning {
+      background: #fffbeb;
+      color: #92400e;
+      border-left: 4px solid var(--warning);
+      font-weight: 500;
+    }
+
+    /* 卡片區塊 */
+    .section {
+      border: 1px solid var(--border-color);
+      padding: 24px;
+      margin-bottom: 24px;
+      border-radius: var(--radius-md);
+      background: #fff;
+      transition: box-shadow 0.3s ease;
+    }
+    
+    .section:hover {
+      box-shadow: var(--shadow-md);
+    }
+
+    .section-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 2px solid var(--bg-color);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* 表單元素 */
+    .form-group { margin-bottom: 18px; }
+    
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 600;
+      font-size: 14px;
+      color: #374151;
+    }
+
+    input[type="text"], input[type="password"], input[type="number"], input[type="time"], textarea, select {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      background-color: var(--input-bg);
+      color: var(--text-main);
+      font-size: 14px;
+      font-family: inherit;
+      transition: all 0.2s ease;
+    }
+
+    input:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: var(--primary);
+      background-color: #fff;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+    }
+
+    input:read-only {
+      background-color: #e5e7eb;
+      color: var(--text-muted);
+      cursor: not-allowed;
+    }
+
+    textarea { resize: vertical; min-height: 90px; }
+
+    /* 按鈕 */
+    button {
+      width: 100%;
+      padding: 14px;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: 600;
+      margin-top: 15px;
+      box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.4);
+      transition: all 0.2s ease;
+    }
+
+    button:disabled {
+      background: #9ca3af;
+      box-shadow: none;
+      cursor: not-allowed;
+    }
+
+    button:hover:not(:disabled) {
+      background: var(--primary-hover);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 8px -1px rgba(59, 130, 246, 0.5);
+    }
+
+    /* 提示文字 */
+    .hint {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 6px;
+      line-height: 1.4;
+    }
+
+    /* 通道卡片 */
+    .push-channel {
+      border: 1px solid var(--border-color);
+      padding: 16px;
+      margin-bottom: 16px;
+      border-radius: var(--radius-sm);
+      background: var(--input-bg);
+      transition: all 0.3s ease;
+    }
+    
+    .push-channel.enabled {
+      background: #fff;
+      border-color: #bfdbfe;
+      box-shadow: 0 2px 4px rgba(59, 130, 246, 0.05);
+    }
+
+    .push-channel-header { display: flex; align-items: center; margin-bottom: 10px; }
+    .push-channel-body { display: none; margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); }
+    .push-channel.enabled .push-channel-body { display: block; animation: fadeIn 0.3s ease; }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-5px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .push-type-hint {
+      font-size: 12px;
+      color: #4b5563;
+      margin-top: 8px;
+      padding: 10px;
+      background: #e5e7eb;
+      border-radius: var(--radius-sm);
+      font-family: monospace;
+    }
+
+    /* iOS 風格開關 */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+      vertical-align: middle;
+      flex-shrink: 0;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #d1d5db;
+      transition: .3s;
+      border-radius: 24px;
+    }
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .3s cubic-bezier(0.4, 0.0, 0.2, 1);
+      border-radius: 50%;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    input:checked + .slider { background-color: var(--success); }
+    input:checked + .slider:before { transform: translateX(20px); }
+
+    .label-inline { display: inline; font-weight: 600; margin-left: 10px; cursor: pointer; color: var(--text-main); }
+
+    /* 徽章 Badge */
+    .status-badge {
+      font-size: 12px;
+      padding: 3px 8px;
+      border-radius: 20px;
+      margin-left: auto;
+      font-weight: 600;
+    }
+    .badge-disabled { background: #f3f4f6; color: #6b7280; border: 1px solid #d1d5db; }
+    .badge-enabled { background: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
+
+    /* 懸浮狀態欄 (玻璃擬物化) */
+    .floating-status {
+      position: fixed;
+      bottom: 25px;
+      right: 25px;
+      padding: 12px 20px;
+      border-radius: 30px;
+      font-weight: 600;
+      font-size: 14px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+      z-index: 1000;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+    .floating-status:hover { transform: translateY(-3px); box-shadow: 0 15px 30px rgba(0,0,0,0.15); }
+    
+    .float-offline { background: rgba(254, 226, 226, 0.9); color: #991b1b; border: 1px solid rgba(254, 202, 202, 0.5); }
+    .float-online { background: rgba(209, 250, 229, 0.9); color: #065f46; border: 1px solid rgba(167, 243, 208, 0.5); }
+    
+    .status-dot { width: 12px; height: 12px; border-radius: 50%; }
+    .dot-offline { background: var(--danger); box-shadow: 0 0 8px var(--danger); animation: pulse-red 2s infinite; }
+    .dot-online { background: var(--success); box-shadow: 0 0 8px var(--success); animation: pulse-green 2s infinite; }
+
+    @keyframes pulse-green { 0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); } 70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); } 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); } }
+    @keyframes pulse-red { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 70% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
+
+    /* 響應式設計 */
+    @media (max-width: 768px) {
+      body { padding: 10px; }
+      .container { padding: 20px; border-radius: var(--radius-md); }
+      .nav { flex-direction: column; gap: 8px; }
+      .nav a { width: 100%; }
+      .floating-status { right: 15px; left: 15px; bottom: 15px; justify-content: center; }
+      .section { padding: 15px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📱 簡訊轉發器</h1>
+    
+    <div class="nav">
+      <a href="/" class="active">⚙️ 系統配置</a>
+      <a href="/tools">🧰 工具箱</a>
+      <a href="/ota">🚀 OTA 升級</a>
+      <a href="/logout" class="logout">🚪 登出</a>
+    </div>
+    
+    <div class="status" id="status">
+      <span style="display:inline-block; animation: spin 2s linear infinite;">⏳</span> 加載中...
+    </div>
+    
+    <form id="configForm">
+      
+      <div class="section">
+        <div class="section-title">🔐 Web 管理帳號設定</div>
+        <div class="warning">⚠️ 首次使用請務必修改預設密碼！</div>
+        <div class="form-group">
+          <label>管理帳號</label>
+          <input type="text" name="webUser" value="admin" readonly>
+        </div>
+        <div class="form-group">
+          <label>管理密碼</label>
+          <input type="password" name="webPass" placeholder="請設置高強度複雜密碼">
+        </div>
+      </div>
+      
+      <div class="section">
+        <div class="section-title">🔗 HTTP 推送通道設定</div>
+        <div class="hint" style="margin-bottom:18px;">💡 可同時啟用多個推送通道，支援多種通知方式。</div>
+        <div id="channelsContainer"></div>
+      </div>
+      
+      <div class="section">
+        <div class="section-title">👤 管理員設定</div>
+        <div class="form-group">
+          <label>管理員手機號</label>
+          <input type="text" name="adminPhone" placeholder="例如: 0912345678 或 13800138000">
+        </div>
+      </div>
+   
+      <div class="section">
+        <div class="section-title">🚫 號碼黑名單</div>
+        <div class="hint" style="margin-bottom:18px;">💡 每行填寫一個號碼，來自這些號碼的簡訊將會被直接忽略，不會推送。</div>
+        <div class="form-group">
+          <textarea name="numberBlackList" rows="5" placeholder="輸入要攔截的號碼..."></textarea>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">📡 4G 模組核心底層參數</div>
+        <div class="warning" style="margin-bottom:18px;">
+          ⚠️ 注意：此處參數會進行持久化儲存。修改底層參數將直接變更 SIM 卡與基站通訊狀態，請確認無誤後再儲存！
+        </div>
+        
+        <div class="form-group">
+          <label>電信商網路鎖定 (漫遊/鎖定特定基站專用)</label>
+          <select name="plmn" id="plmnSelect">
+            <option value="AUTO">🔄 恢復全網通自動選擇網路 (推薦)</option>
+            <option value="46000">中國移動 (46000)</option>
+            <option value="46001">中國聯通 (46001)</option>
+            <option value="46011">中國電信 (46011)</option>
+          </select>
+          <div class="hint">若下拉選單沒有你的漫遊地電信商，請至工具箱執行「基站掃描」獲取 PLMN 代碼，直接手動填入。</div>
+          <input type="text" id="customPlmnInput" placeholder="手動填入 5~6 位數字 PLMN 代碼 (例如: 46692)" style="margin-top: 10px;">
+        </div>
+
+        <div class="form-group">
+          <label style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span>💬 簡訊中心號碼 (SMSC)</span>
+            <span id="realSmscBadge" style="font-size: 12px; color: #1d4ed8; background: #dbeafe; padding: 4px 10px; border-radius: 6px; font-family: monospace; font-weight: 700;">讀取中...</span>
+          </label>
+          <input type="text" name="smsc" placeholder="例如: +8613800138000">
+          <div class="hint">若設備完全無法發出簡訊（報 CMS ERROR 330），請在此處修正當地電信商合法的服務中心號碼。</div>
+        </div>
+
+        <div class="form-group">
+          <label style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span>🔧 自訂改寫 IMEI 串碼 (15位純數字)</span>
+            <span id="realImeiBadge" style="font-size: 12px; color: #065f46; background: #d1fae5; padding: 4px 10px; border-radius: 6px; font-family: monospace; font-weight: 700;">讀取中...</span>
+          </label>
+          <input type="text" name="imei" placeholder="不修改請留空" maxlength="15">
+          <div class="hint">部分特殊漫遊卡片需要特定設備 IMEI 才能附著上網。寫入成功後通常需要將設備重啟方可完全生效。</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">⏱️ 定時任務 (依賴 NTP 同步)</div>
+        <div class="hint" style="margin-bottom:18px;">💡 每日定時測試網路連通性或發送存活報告。</div>
+        <div id="cronContainer"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">📝 系統日誌 (Syslog) 設定</div>
+        <div class="form-group" style="display: flex; align-items: center; flex-wrap: wrap;">
+          <label class="switch">
+            <input type="checkbox" name="syslogEnabled" id="syslogEnabled" onchange="toggleSyslog()">
+            <span class="slider"></span>
+          </label>
+          <label for="syslogEnabled" class="label-inline">啟用 Syslog 推送</label>
+          <span id="syslogStatusBadge" class="status-badge badge-disabled">已停用</span>
+        </div>
+        
+        <div id="syslogConfigBody" style="display:none; margin-top:20px; padding-top: 20px; border-top: 1px dashed var(--border-color);">
+          <div class="form-group">
+            <label>Syslog 伺服器 IP</label>
+            <input type="text" name="syslogServer" placeholder="例如: 192.168.1.100">
+          </div>
+          <div class="form-group">
+            <label>端口 (預設 514)</label>
+            <input type="number" name="syslogPort" placeholder="514">
+          </div>
+        </div>
+      </div>
+      
+      <button type="submit" id="saveBtn">💾 保存配置參數</button>
+    </form>
+  </div>
+
+  <div id="simFloatingStatus" class="floating-status float-offline">
+    <div id="simDot" class="status-dot dot-offline"></div>
+    <span id="simText">SIM: 狀態獲取中...</span>
+  </div>
+
+  <style>@keyframes spin { 100% { transform: rotate(360deg); } }</style>
+
+  <script>
+    function checkAuthError(res) {
+      if(res.status === 401) { window.location.href = '/login'; return true; }
+      return false;
+    }
+
+    function renderChannels() {
+      let html = '';
+      for (let i = 0; i < 5; i++) {
+        html += `
+          <div class="push-channel" id="channel${i}">
+            <div class="push-channel-header">
+              <label class="switch">
+                <input type="checkbox" name="push${i}en" id="push${i}en" onchange="toggleChannel(${i})">
+                <span class="slider"></span>
+              </label>
+              <label for="push${i}en" class="label-inline">啟用推送通道 ${i + 1}</label>
+              <span id="channelStatusBadge${i}" class="status-badge badge-disabled">已停用</span>
+            </div>
+            <div class="push-channel-body">
+              <div class="form-group">
+                <label>通道名稱</label>
+                <input type="text" name="push${i}name" placeholder="請輸入自訂名稱">
+              </div>
+              <div class="form-group">
+                <label>推送方式</label>
+                <select name="push${i}type" id="push${i}type" onchange="updateTypeHint(${i})">
+                  <option value="1">POST JSON（通用格式）</option>
+                  <option value="2">Bark（iOS 推送）</option>
+                  <option value="3">GET 請求（參數在 URL 中）</option>
+                  <option value="6">Server醬</option>
+                  <option value="7">自訂模板</option>
+                  <option value="9">Gotify</option>
+                  <option value="10">Telegram Bot</option>
+                </select>
+                <div class="push-type-hint" id="hint${i}"></div>
+              </div>
+              <div class="form-group">
+                <label>推送 URL / Webhook</label>
+                <input type="text" name="push${i}url" placeholder="http://your-server.com/api">
+              </div>
+              <div id="extra${i}" style="display:none;">
+                <div class="form-group">
+                  <label id="key1label${i}">參數 1</label>
+                  <input type="text" name="push${i}key1" id="key1${i}">
+                </div>
+                <div class="form-group" id="key2group${i}">
+                  <label id="key2label${i}">參數 2</label>
+                  <input type="text" name="push${i}key2" id="key2${i}">
+                </div>
+              </div>
+              <div id="custom${i}" style="display:none;">
+                <div class="form-group">
+                  <label>請求體模板 <br><small style="color:var(--text-muted);font-weight:normal;">({sender} {message} {timestamp} {apn} {isp})</small></label>
+                  <textarea name="push${i}body" rows="4" style="font-family:monospace;"></textarea>
+                </div>
+              </div>
+            </div>
+          </div>`;
+      }
+      document.getElementById('channelsContainer').innerHTML = html;
+    }
+
+    function renderCron() {
+      let html = '';
+      for (let i = 0; i < 3; i++) {
+        html += `
+          <div class="push-channel" id="cronBlock${i}">
+            <div class="push-channel-header">
+              <label class="switch">
+                <input type="checkbox" name="cron${i}en" id="cron${i}en" onchange="toggleCron(${i})">
+                <span class="slider"></span>
+              </label>
+              <label for="cron${i}en" class="label-inline">定時任務 ${i + 1}</label>
+              <span id="cronStatusBadge${i}" class="status-badge badge-disabled">已停用</span>
+            </div>
+            <div class="push-channel-body" id="cronBody${i}">
+              <div class="form-group">
+                <label>任務類型</label>
+                <select name="cron${i}type" id="cron${i}type" onchange="updateCronType(${i})">
+                  <option value="0">📡 Ping 網路測試保活</option>
+                  <option value="1">📨 發送定時簡訊存活報告</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>執行時間 (HH:MM)</label>
+                <input type="time" name="cron${i}time" id="cron${i}time">
+              </div>
+              <div class="form-group">
+                <label>執行週期設定</label>
+                <select name="cron${i}interval" id="cron${i}interval">
+                  <option value="1">📅 每天固定執行一次</option>
+                  <option value="3">🗓️ 每 3 天執行一次</option>
+                  <option value="7">🗓️ 每 7 天執行一次</option>
+                  <option value="30">🗓️ 每 30 天執行一次</option>
+                  <option value="0">📌 單次任務 (執行完後自動關閉)</option>
+                </select>
+              </div>
+              <div id="cronSmsGroup${i}" style="display:none;">
+                <div class="form-group">
+                  <label>接收號碼</label>
+                  <input type="text" name="cron${i}phone" placeholder="輸入接收手機號">
+                </div>
+                <div class="form-group">
+                  <label>簡訊內容</label>
+                  <input type="text" name="cron${i}content" placeholder="設備一切正常">
+                </div>
+              </div>
+              <div id="cronPingGroup${i}" style="display:none;">
+                 <div class="form-group">
+                   <label>Ping 目的地 (IP 或域名)</label>
+                   <input type="text" name="cron${i}target" placeholder="8.8.8.8">
+                 </div>
+              </div>
+            </div>
+          </div>`;
+      }
+      document.getElementById('cronContainer').innerHTML = html;
+    }
+
+    function toggleChannel(idx) {
+      var ch = document.getElementById('channel' + idx);
+      var cb = document.getElementById('push' + idx + 'en');
+      var badge = document.getElementById('channelStatusBadge' + idx);
+      if (cb.checked) {
+        ch.classList.add('enabled');
+        badge.textContent = "已啟用";
+        badge.className = "status-badge badge-enabled";
+      } else {
+        ch.classList.remove('enabled');
+        badge.textContent = "已停用";
+        badge.className = "status-badge badge-disabled";
+      }
+    }
+
+    function toggleCron(idx) {
+      var cb = document.getElementById('cron' + idx + 'en');
+      var body = document.getElementById('cronBody' + idx);
+      var badge = document.getElementById('cronStatusBadge' + idx);
+      var block = document.getElementById('cronBlock' + idx);
+      
+      var enabled = cb.checked;
+      block.className = enabled ? 'push-channel enabled' : 'push-channel';
+      body.querySelectorAll('input, select, textarea').forEach(el => el.disabled = !enabled);
+
+      if (enabled) {
+        badge.textContent = "已啟用";
+        badge.className = "status-badge badge-enabled";
+      } else {
+        badge.textContent = "已停用";
+        badge.className = "status-badge badge-disabled";
+      }
+    }
+
+    function toggleSyslog() {
+      var cb = document.getElementById('syslogEnabled');
+      var body = document.getElementById('syslogConfigBody');
+      var badge = document.getElementById('syslogStatusBadge');
+      
+      if (cb.checked) {
+        body.style.display = 'block';
+        badge.textContent = "已啟用";
+        badge.className = "status-badge badge-enabled";
+      } else {
+        body.style.display = 'none';
+        badge.textContent = "已停用";
+        badge.className = "status-badge badge-disabled";
+      }
+    }
+
+    function updateCronType(idx) {
+      var type = document.getElementById('cron' + idx + 'type').value;
+      document.getElementById('cronSmsGroup' + idx).style.display = (type == '1') ? 'block' : 'none';
+      document.getElementById('cronPingGroup' + idx).style.display = (type == '0') ? 'block' : 'none';
+    }
+
+    function updateTypeHint(idx) {
+      var type = parseInt(document.getElementById('push' + idx + 'type').value);
+      var hint = document.getElementById('hint' + idx);
+      var extraFields = document.getElementById('extra' + idx);
+      var customFields = document.getElementById('custom' + idx);
+      extraFields.style.display = 'none';
+      customFields.style.display = 'none';
+      document.getElementById('key1label' + idx).innerText = '參數1';
+      document.getElementById('key2label' + idx).innerText = '參數2';
+      document.getElementById('key2' + idx).closest('.form-group').style.display = 'none';
+
+      if (type == 1) hint.innerHTML = '<b>👉 POST JSON：</b><br>{"sender":"號碼","message":"內容","timestamp":"時間"}';
+      else if (type == 2) hint.innerHTML = '<b>👉 Bark：</b><br>POST {"title":"號碼","body":"內容"}';
+      else if (type == 3) hint.innerHTML = '<b>👉 GET 請求：</b><br>URL?sender=x&message=x&timestamp=x';
+      else if (type == 6) { hint.innerHTML = '<b>👉 Server醬：</b><br>填寫 SendKey，URL 留空即可'; extraFields.style.display = 'block'; document.getElementById('key1label' + idx).innerText = 'SendKey'; }
+      else if (type == 7) { hint.innerHTML = '<b>👉 自訂模板：</b><br>支援佔位符：{sender} {message} {timestamp} {ip} {device} {apn} {isp} {phone}'; customFields.style.display = 'block'; }
+      else if (type == 9) { hint.innerHTML = '<b>👉 Gotify：</b><br>填寫 URL，Token 欄位填寫應用 Token'; extraFields.style.display = 'block'; document.getElementById('key1label' + idx).innerText = 'Token'; }
+      else if (type == 10) { hint.innerHTML = '<b>👉 Telegram Bot：</b><br>填寫 Chat ID 和 Bot Token，URL 留空即可'; extraFields.style.display = 'block'; document.getElementById('key1label' + idx).innerText = 'Chat ID'; document.getElementById('key2label' + idx).innerText = 'Bot Token'; document.getElementById('key2' + idx).closest('.form-group').style.display = 'block'; }
+    }
+
+    function updateSysStatus() {
+      fetch('/api/sysinfo').then(r=>{ if(checkAuthError(r)) throw new Error('Unauthorized'); return r.json(); }).then(data => {
+        if(data.ip) {
+          document.getElementById('status').innerHTML = '🌐 設備 IP: <strong>' + data.ip + '</strong> &nbsp;|&nbsp; 韌體版本: <strong style="color:var(--success);">' + (data.version || '未知') + '</strong>';
+        }
+        var widget = document.getElementById('simFloatingStatus');
+        var dot = document.getElementById('simDot');
+        var text = document.getElementById('simText');
+        if(data.cellular) {
+           widget.className = 'floating-status float-online';
+          dot.className = 'status-dot dot-online';
+          text.textContent = 'SIM: 網路已附著';
+        } else {
+          widget.className = 'floating-status float-offline';
+          dot.className = 'status-dot dot-offline';
+          text.textContent = 'SIM: 斷開或未註冊';
+        }
+      }).catch(e => {});
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      renderChannels();
+      renderCron();
+      for (let i = 0; i < 3; i++) toggleCron(i);
+      updateSysStatus();
+      setInterval(updateSysStatus, 3000);
+
+      fetch('/api/config').then(r=>{ if(checkAuthError(r)) throw new Error('Unauthorized'); return r.json(); }).then(data => {
+        document.querySelector('[name=webUser]').value = 'admin';
+        document.querySelector('[name=webPass]').value = data.webPass;
+        document.querySelector('[name=adminPhone]').value = data.adminPhone;
+        document.querySelector('[name=numberBlackList]').value = data.numberBlackList;
+        if (data.smsc) document.querySelector('[name=smsc]').value = data.smsc;
+        if (data.imei) document.querySelector('[name=imei]').value = data.imei;
+        if (data.plmn) {
+            const selectEl = document.getElementById('plmnSelect');
+            if (["AUTO", "46000", "46001", "46011"].includes(data.plmn)) {
+                selectEl.value = data.plmn;
+            } else {
+                selectEl.value = "AUTO";
+                document.getElementById('customPlmnInput').value = data.plmn;
+            }
+        }
+        
+        document.getElementById('configForm').addEventListener('submit', function() {
+            const customPlmn = document.getElementById('customPlmnInput').value.trim();
+            if (customPlmn.length >= 5) {
+                document.getElementById('plmnSelect').append(new Option(customPlmn, customPlmn, true, true));
+            }
+        });
+        document.querySelector('[name=syslogEnabled]').checked = data.syslogEnabled;
+        toggleSyslog();
+        document.querySelector('[name=syslogServer]').value = data.syslogServer;
+        document.querySelector('[name=syslogPort]').value = data.syslogPort;
+        
+        data.pushChannels.forEach((ch, i) => {
+          document.getElementById('push'+i+'en').checked = ch.enabled;
+          document.querySelector(`[name=push${i}name]`).value = ch.name;
+          document.querySelector(`[name=push${i}type]`).value = ch.type;
+          document.querySelector(`[name=push${i}url]`).value = ch.url;
+          document.querySelector(`[name=push${i}key1]`).value = ch.key1;
+          document.querySelector(`[name=push${i}key2]`).value = ch.key2;
+          document.querySelector(`[name=push${i}body]`).value = ch.body;
+          toggleChannel(i);
+          updateTypeHint(i);
+        });
+        
+        if (data.cronTasks) {
+          data.cronTasks.forEach((tsk, i) => {
+            document.getElementById('cron'+i+'en').checked = tsk.enabled;
+            document.querySelector(`[name=cron${i}type]`).value = tsk.type;
+            
+            let hr = tsk.hour.toString().padStart(2, '0');
+            let mn = tsk.minute.toString().padStart(2, '0');
+            document.querySelector(`[name=cron${i}time]`).value = `${hr}:${mn}`;
+            document.querySelector(`[name=cron${i}interval]`).value = tsk.daysInterval || 1;
+            
+            document.querySelector(`[name=cron${i}phone]`).value = tsk.phone;
+            document.querySelector(`[name=cron${i}content]`).value = tsk.content;
+            document.querySelector(`[name=cron${i}target]`).value = tsk.pingTarget || '8.8.8.8';
+            
+            toggleCron(i);
+            updateCronType(i);
+          });
+        }
+      }).catch(e => {});
+      
+      fetch('/api/smsc').then(r => { if(checkAuthError(r)) throw new Error(); return r.json(); }).then(d => {
+        document.getElementById('realSmscBadge').textContent = "模組當前: " + (d.smsc && d.smsc !== '未知' ? d.smsc : "未讀到");
+      }).catch(e => { document.getElementById('realSmscBadge').textContent = "模組當前: 讀取失敗"; });
+      
+      fetch('/api/getimei').then(r => { if(checkAuthError(r)) throw new Error(); return r.json(); }).then(d => {
+        document.getElementById('realImeiBadge').textContent = "模組當前: " + (d.imei && d.imei !== '未知' ? d.imei : "未讀到");
+      }).catch(e => { document.getElementById('realImeiBadge').textContent = "模組當前: 讀取失敗"; });
+    });
+    
+    document.getElementById('configForm').onsubmit = function(e) {
+      e.preventDefault();
+      const btn = document.getElementById('saveBtn');
+      btn.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在保存...';
+      btn.disabled = true;
+      const formData = new FormData(this);
+      const payload = Object.fromEntries(formData.entries());
+      document.querySelectorAll('#configForm input[type="checkbox"]').forEach(cb => {
+        payload[cb.name] = cb.checked;
+      });
+      fetch('/api/save', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
+      .then(r=>{ if(checkAuthError(r)) throw new Error('Unauthorized'); return r.json(); }).then(res => {
+        alert(res.message);
+      }).catch(err => { if (err.message !== 'Unauthorized') alert("網路錯誤: " + err); })
+      .finally(() => { btn.innerHTML = '💾 保存配置參數'; btn.disabled = false; });
+    };
+  </script>
+</body>
+</html>

@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OTA 韌體升級 - 簡訊轉發器</title>
+  <style>
+    :root {
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #10b981;
+      --danger: #ef4444;
+      --danger-hover: #dc2626;
+      --warning: #f59e0b;
+      --warning-bg: #fffbeb;
+      --warning-text: #92400e;
+      --bg-color: #f3f4f6;
+      --card-bg: #ffffff;
+      --text-main: #1f2937;
+      --text-muted: #6b7280;
+      --border-color: #e5e7eb;
+      --input-bg: #f9fafb;
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
+      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      line-height: 1.5;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      background: var(--card-bg);
+      padding: 30px;
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-lg);
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 25px;
+      letter-spacing: -0.5px;
+    }
+
+    /* 頂部導航 (為了保持全站體驗一致，我為你補上了導航列) */
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 25px;
+      background: var(--bg-color);
+      padding: 8px;
+      border-radius: var(--radius-md);
+    }
+    .nav a {
+      flex: 1; text-align: center; padding: 12px 15px; background: transparent;
+      border-radius: var(--radius-sm); text-decoration: none; color: var(--text-muted);
+      font-weight: 600; font-size: 14px; transition: all 0.2s ease;
+    }
+    .nav a:hover { background: #e5e7eb; color: var(--text-main); }
+    .nav a.active { background: var(--card-bg); color: var(--primary); box-shadow: var(--shadow-sm); }
+    .nav a.logout { color: var(--danger); flex: 0.3; }
+    .nav a.logout:hover { background: var(--danger); color: white; }
+
+    /* 警告區塊 */
+    .warning {
+      background: var(--warning-bg);
+      color: var(--warning-text);
+      border-left: 4px solid var(--warning);
+      padding: 16px 20px;
+      border-radius: var(--radius-sm);
+      margin-bottom: 24px;
+      font-size: 15px;
+      font-weight: 600;
+      line-height: 1.6;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    /* 客製化檔案上傳區塊 */
+    .file-upload-wrapper {
+      position: relative;
+      width: 100%;
+      border: 2px dashed #cbd5e1;
+      border-radius: var(--radius-md);
+      background-color: var(--input-bg);
+      padding: 40px 20px;
+      text-align: center;
+      transition: all 0.3s ease;
+      cursor: pointer;
+      margin-bottom: 24px;
+    }
+    .file-upload-wrapper:hover, .file-upload-wrapper.dragover {
+      border-color: var(--primary);
+      background-color: #eff6ff;
+    }
+    .file-upload-icon {
+      font-size: 40px;
+      margin-bottom: 10px;
+      display: block;
+    }
+    .file-upload-text {
+      font-size: 16px;
+      color: var(--text-main);
+      font-weight: 600;
+      margin-bottom: 5px;
+    }
+    .file-upload-hint {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    input[type="file"] {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      width: 100%; height: 100%;
+      opacity: 0;
+      cursor: pointer;
+    }
+    .selected-file-name {
+      display: inline-block;
+      margin-top: 15px;
+      padding: 6px 12px;
+      background: #d1fae5;
+      color: #065f46;
+      border-radius: 20px;
+      font-size: 14px;
+      font-weight: bold;
+      display: none; /* 預設隱藏，選中後顯示 */
+    }
+
+    /* 按鈕樣式 */
+    button {
+      width: 100%;
+      padding: 16px;
+      background: var(--danger);
+      color: white;
+      border: none;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: 700;
+      box-shadow: 0 4px 6px -1px rgba(239, 68, 68, 0.4);
+      transition: all 0.2s ease;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+    }
+    button:disabled {
+      background: #9ca3af;
+      box-shadow: none;
+      cursor: not-allowed;
+      transform: none !important;
+    }
+    button:hover:not(:disabled) {
+      background: var(--danger-hover);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 8px -1px rgba(239, 68, 68, 0.5);
+    }
+
+    /* 進度條與狀態區塊 */
+    #progress-wrapper {
+      display: none;
+      margin-top: 30px;
+      padding: 20px;
+      border-radius: var(--radius-md);
+      background: #f8fafc;
+      border: 1px solid var(--border-color);
+      animation: fadeIn 0.4s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+    #status {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--primary);
+      margin-bottom: 12px;
+      text-align: center;
+    }
+
+    /* 現代化進度條 */
+    progress {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 18px;
+      border-radius: 20px;
+      overflow: hidden;
+      border: none;
+    }
+    progress::-webkit-progress-bar {
+      background-color: #e2e8f0;
+      border-radius: 20px;
+    }
+    progress::-webkit-progress-value {
+      background-color: var(--primary);
+      background-image: linear-gradient(
+        45deg, 
+        rgba(255, 255, 255, 0.15) 25%, 
+        transparent 25%, 
+        transparent 50%, 
+        rgba(255, 255, 255, 0.15) 50%, 
+        rgba(255, 255, 255, 0.15) 75%, 
+        transparent 75%, 
+        transparent
+      );
+      background-size: 1rem 1rem;
+      border-radius: 20px;
+      transition: width 0.3s ease;
+      animation: progress-stripes 1s linear infinite;
+    }
+    @keyframes progress-stripes { from { background-position: 1rem 0; } to { background-position: 0 0; } }
+
+    @media (max-width: 640px) {
+      body { padding: 10px; }
+      .container { padding: 20px; }
+      .nav { flex-direction: column; gap: 8px; }
+      .nav a { width: 100%; }
+    }
+    @keyframes spin { 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🚀 系統 OTA 升級</h1>
+    
+    <div class="nav">
+      <a href="/">⚙️ 系統配置</a>
+      <a href="/tools">🧰 工具箱</a>
+      <a href="/ota" class="active">🚀 OTA 升級</a>
+      <a href="/logout" class="logout">🚪 登出</a>
+    </div>
+
+    <div class="warning">
+      <span>⚠️</span>
+      <div>警告：升級期間將自動暫停模組通訊以保證穩定。升級完成後設備將自動重啟。<strong>請勿中途斷開電源或刷新頁面！</strong></div>
+    </div>
+    
+    <form id="otaForm">
+      <div class="file-upload-wrapper" id="dropZone">
+        <span class="file-upload-icon">📁</span>
+        <div class="file-upload-text" id="fileText">點擊此處，或將韌體檔案拖曳至此</div>
+        <div class="file-upload-hint">僅支援 .bin 格式的編譯檔</div>
+        <div class="selected-file-name" id="fileNameBadge"></div>
+        <input type="file" id="fwFile" name="update" accept=".bin" required>
+      </div>
+      
+      <button type="submit" id="uploadBtn">⚡ 開始刷入韌體</button>
+    </form>
+    
+    <div id="progress-wrapper">
+      <p id="status">準備上傳...</p>
+      <progress id="progressBar" value="0" max="100"></progress>
+    </div>
+  </div>
+
+  <script>
+    // UI 互動：選擇檔案後更新顯示文字
+    const fwFile = document.getElementById('fwFile');
+    const fileText = document.getElementById('fileText');
+    const fileNameBadge = document.getElementById('fileNameBadge');
+    const dropZone = document.getElementById('dropZone');
+
+    fwFile.addEventListener('change', function() {
+      if (this.files && this.files.length > 0) {
+        fileText.innerText = "已選擇韌體檔案";
+        fileNameBadge.innerText = "📄 " + this.files[0].name;
+        fileNameBadge.style.display = "inline-block";
+        dropZone.style.borderColor = "var(--success)";
+        dropZone.style.backgroundColor = "#ecfdf5";
+      }
+    });
+
+    // 拖拽高亮效果
+    dropZone.addEventListener('dragover', () => dropZone.classList.add('dragover'));
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', () => dropZone.classList.remove('dragover'));
+
+    // 核心上傳邏輯 (原樣保留 XHR 特性)
+    document.getElementById('otaForm').onsubmit = function(e) {
+      e.preventDefault();
+      var file = document.getElementById('fwFile').files[0];
+      if (!file) {
+        alert("請先選擇韌體檔案 (.bin)");
+        return;
+      }
+      
+      if (!confirm('🚨 確定要開始更新韌體嗎？\n更新過程中請絕對不要關閉此頁面或切斷電源！')) return;
+      
+      const btn = document.getElementById('uploadBtn');
+      btn.disabled = true;
+      btn.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在刷入，請勿斷電...';
+      
+      const progressWrapper = document.getElementById('progress-wrapper');
+      const progressBar = document.getElementById('progressBar');
+      const statusText = document.getElementById('status');
+      
+      progressWrapper.style.display = 'block';
+      statusText.style.color = "var(--primary)";
+      
+      var xhr = new XMLHttpRequest();
+      xhr.upload.addEventListener('progress', function(e) {
+        if (e.lengthComputable) {
+          var percent = Math.round((e.loaded / e.total) * 100);
+          progressBar.value = percent;
+          statusText.innerText = '上傳與寫入進度: ' + percent + '%';
+        }
+      });
+      
+      xhr.onload = function() {
+        if (xhr.status === 200 && xhr.responseText === "OK") {
+          progressBar.value = 100;
+          statusText.style.color = "var(--success)";
+          statusText.innerText = '✅ 更新成功！設備正在重啟，請稍候幾秒再重新整理頁面。';
+          btn.innerHTML = '🎉 升級完成';
+          setTimeout(() => { window.location.href = '/'; }, 8000);
+        } else {
+          progressBar.value = 0;
+          statusText.style.color = "var(--danger)";
+          statusText.innerText = '❌ 更新失敗，韌體格式錯誤或記憶體不足。';
+          btn.disabled = false;
+          btn.innerHTML = '⚡ 重新嘗試刷入';
+        }
+      };
+      
+      xhr.onerror = function() {
+          progressBar.value = 0;
+          statusText.style.color = "var(--danger)";
+          statusText.innerText = '❌ 網路連接中斷，上傳失敗。';
+          btn.disabled = false;
+          btn.innerHTML = '⚡ 重新嘗試刷入';
+      };
+      
+      xhr.open('POST', '/api/update', true);
+      // 【關鍵保留點】不要套用 FormData，直接發送二進制檔案實體！
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.send(file);
+    };
+  </script>
+</body>
+</html>

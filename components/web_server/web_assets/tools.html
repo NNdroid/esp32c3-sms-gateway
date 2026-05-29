@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>工具箱 - 簡訊轉發器</title>
+  <style>
+    :root {
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #10b981;
+      --success-hover: #059669;
+      --danger: #ef4444;
+      --danger-hover: #dc2626;
+      --warning: #f59e0b;
+      --warning-hover: #d97706;
+      --purple: #8b5cf6;
+      --purple-hover: #7c3aed;
+      --cyan: #06b6d4;
+      --cyan-hover: #0891b2;
+      --pink: #ec4899;
+      --pink-hover: #db2777;
+      --slate: #64748b;
+      --slate-hover: #475569;
+      --bg-color: #f3f4f6;
+      --card-bg: #ffffff;
+      --text-main: #1f2937;
+      --text-muted: #6b7280;
+      --border-color: #e5e7eb;
+      --input-bg: #f9fafb;
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
+      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      line-height: 1.5;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      background: var(--card-bg);
+      padding: 30px;
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-lg);
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 25px;
+      letter-spacing: -0.5px;
+    }
+
+    /* 頂部導航 */
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 25px;
+      background: var(--bg-color);
+      padding: 8px;
+      border-radius: var(--radius-md);
+    }
+
+    .nav a {
+      flex: 1;
+      text-align: center;
+      padding: 12px 15px;
+      background: transparent;
+      border-radius: var(--radius-sm);
+      text-decoration: none;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 14px;
+      transition: all 0.2s ease;
+    }
+
+    .nav a:hover { background: #e5e7eb; color: var(--text-main); }
+    .nav a.active { background: var(--card-bg); color: var(--primary); box-shadow: var(--shadow-sm); }
+    .nav a.logout { color: var(--danger); flex: 0.3; }
+    .nav a.logout:hover { background: var(--danger); color: white; }
+
+    /* 卡片區塊 */
+    .section {
+      border: 1px solid var(--border-color);
+      padding: 24px;
+      margin-bottom: 24px;
+      border-radius: var(--radius-md);
+      background: #fff;
+      transition: box-shadow 0.3s ease;
+    }
+    .section:hover { box-shadow: var(--shadow-md); }
+
+    .section-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 2px solid var(--bg-color);
+    }
+
+    /* 狀態提示 */
+    .status {
+      padding: 14px 18px;
+      background: #eff6ff;
+      color: #1e3a8a;
+      border-left: 4px solid var(--primary);
+      border-radius: var(--radius-sm);
+      margin-bottom: 20px;
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    /* 表單元素 */
+    .form-group { margin-bottom: 16px; }
+    label { display: block; margin-bottom: 8px; font-weight: 600; font-size: 14px; color: #374151; }
+    
+    input[type="text"], textarea {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      background-color: var(--input-bg);
+      color: var(--text-main);
+      font-size: 14px;
+      font-family: inherit;
+      transition: all 0.2s ease;
+    }
+    input:focus, textarea:focus {
+      outline: none;
+      border-color: var(--primary);
+      background-color: #fff;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+    }
+    textarea { resize: vertical; min-height: 80px; }
+    
+    .hint { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+
+    /* 按鈕樣式 */
+    button {
+      width: 100%;
+      padding: 12px 16px;
+      border: none;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-size: 15px;
+      font-weight: 600;
+      color: white;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    button:disabled { opacity: 0.6; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+    button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+    
+    /* 按鈕顏色類別 */
+    .btn-primary { background: var(--primary); } .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+    .btn-success { background: var(--success); } .btn-success:hover:not(:disabled) { background: var(--success-hover); }
+    .btn-danger { background: var(--danger); }   .btn-danger:hover:not(:disabled) { background: var(--danger-hover); }
+    .btn-warning { background: var(--warning); } .btn-warning:hover:not(:disabled) { background: var(--warning-hover); }
+    .btn-purple { background: var(--purple); }   .btn-purple:hover:not(:disabled) { background: var(--purple-hover); }
+    .btn-cyan { background: var(--cyan); }       .btn-cyan:hover:not(:disabled) { background: var(--cyan-hover); }
+    .btn-pink { background: var(--pink); }       .btn-pink:hover:not(:disabled) { background: var(--pink-hover); }
+    .btn-slate { background: var(--slate); }     .btn-slate:hover:not(:disabled) { background: var(--slate-hover); }
+
+    /* 網格按鈕排版 (取代 btn-group) */
+    .btn-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    /* 查詢結果框 */
+    .result-box {
+      margin-top: 16px;
+      padding: 16px;
+      border-radius: var(--radius-sm);
+      display: none;
+      font-family: "JetBrains Mono", "Courier New", Courier, monospace;
+      white-space: pre-wrap;
+      font-size: 13px;
+      line-height: 1.5;
+      animation: fadeIn 0.3s ease;
+      word-break: break-all;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+    
+    .result-success { background: #ecfdf5; border-left: 4px solid var(--success); color: #065f46; }
+    .result-error { background: #fef2f2; border-left: 4px solid var(--danger); color: #991b1b; }
+    .result-loading { background: #fffbeb; border-left: 4px solid var(--warning); color: #92400e; }
+    .result-info { background: #eff6ff; border-left: 4px solid var(--primary); color: #1e3a8a; }
+
+    /* AT 終端機 */
+    .at-terminal {
+      background: #1e1e1e;
+      color: #4ade80;
+      padding: 16px;
+      height: 240px;
+      overflow-y: auto;
+      border-radius: var(--radius-sm);
+      margin-bottom: 15px;
+      font-family: "JetBrains Mono", "Courier New", Courier, monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+      font-size: 13px;
+      line-height: 1.6;
+      box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+    }
+    
+    /* 終端機滾動條美化 */
+    .at-terminal::-webkit-scrollbar { width: 8px; }
+    .at-terminal::-webkit-scrollbar-track { background: #2d2d2d; border-radius: 4px; }
+    .at-terminal::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
+    .at-terminal::-webkit-scrollbar-thumb:hover { background: #777; }
+
+    .at-input-group { display: flex; gap: 10px; margin-top: 10px; }
+    .at-input-group input { flex: 1; font-family: monospace; }
+    .at-input-group button { width: auto; flex-shrink: 0; padding: 12px 20px; }
+
+    /* 懸浮狀態欄 (玻璃擬物化) */
+    .floating-status {
+      position: fixed;
+      bottom: 25px;
+      right: 25px;
+      padding: 12px 20px;
+      border-radius: 30px;
+      font-weight: 600;
+      font-size: 14px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+      z-index: 1000;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+    .floating-status:hover { transform: translateY(-3px); box-shadow: 0 15px 30px rgba(0,0,0,0.15); }
+    .float-offline { background: rgba(254, 226, 226, 0.9); color: #991b1b; border: 1px solid rgba(254, 202, 202, 0.5); }
+    .float-online { background: rgba(209, 250, 229, 0.9); color: #065f46; border: 1px solid rgba(167, 243, 208, 0.5); }
+    .status-dot { width: 12px; height: 12px; border-radius: 50%; }
+    .dot-offline { background: var(--danger); box-shadow: 0 0 8px var(--danger); animation: pulse-red 2s infinite; }
+    .dot-online { background: var(--success); box-shadow: 0 0 8px var(--success); animation: pulse-green 2s infinite; }
+    @keyframes pulse-green { 0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); } 70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); } 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); } }
+    @keyframes pulse-red { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 70% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
+    @keyframes spin { 100% { transform: rotate(360deg); } }
+
+    /* 表格樣式 (用於 GNSS 等返回的表格) */
+    .info-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px;}
+    .info-table td { padding: 10px 12px; border-bottom: 1px solid var(--border-color); }
+    .info-table tr:last-child td { border-bottom: none; }
+    .info-table td:first-child { font-weight: 600; width: 35%; color: var(--slate); background: #f8fafc; border-radius: 6px 0 0 6px;}
+
+    /* 響應式 */
+    @media (max-width: 640px) {
+      body { padding: 10px; }
+      .container { padding: 20px; }
+      .nav { flex-direction: column; gap: 8px; }
+      .nav a { width: 100%; }
+      .btn-grid { grid-template-columns: 1fr; }
+      .at-input-group { flex-direction: column; }
+      .at-input-group button { width: 100%; }
+      .floating-status { right: 15px; left: 15px; bottom: 15px; justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🧰 工具箱</h1>
+    
+    <div class="nav">
+      <a href="/">⚙️ 系統配置</a>
+      <a href="/tools" class="active">🧰 工具箱</a>
+      <a href="/ota">🚀 OTA 升級</a>
+      <a href="/logout" class="logout">🚪 登出</a>
+    </div>
+    
+    <div class="status" id="status">
+      <span style="display:inline-block; animation: spin 2s linear infinite;">⏳</span> 加載中...
+    </div>
+
+    <form id="smsForm">
+      <div class="section">
+        <div class="section-title">📤 測試發送簡訊</div>
+        <div class="form-group">
+            <label>目標號碼</label>
+            <input type="text" name="phone" placeholder="例如: 13800138000" required>
+        </div>
+        <div class="form-group">
+            <label>簡訊內容</label>
+            <textarea name="content" placeholder="請輸入簡訊內容..." required oninput="document.getElementById('charCount').textContent = this.value.length;"></textarea>
+            <div class="hint" style="text-align: right;">已輸入 <span id="charCount" style="font-weight:bold; color:var(--text-main);">0</span> 字元</div>
+        </div>
+        <button type="submit" id="sendSmsBtn" class="btn-success">📨 發送簡訊</button>
+      </div>
+    </form>
+
+    <div class="section">
+      <div class="section-title">📊 模組資訊快捷查詢</div>
+      <div class="btn-grid">
+        <button type="button" class="btn-purple" onclick="queryInfo('ati')">📋 固件資訊</button>
+        <button type="button" class="btn-purple" onclick="queryInfo('signal')">📶 信號質量</button>
+        <button type="button" class="btn-slate" onclick="queryInfo('siminfo')">💳 SIM 卡資訊</button>
+        <button type="button" class="btn-slate" onclick="queryInfo('network')">🌍 網路狀態</button>
+        <button type="button" class="btn-cyan" onclick="queryInfo('wifi')">📡 WiFi 狀態</button>
+        <button type="button" class="btn-success" onclick="queryInfo('cellip')">🌐 蜂窩網路 IP</button>
+        <button type="button" class="btn-primary" onclick="queryInfo('chipinfo')">🌡️ 晶片溫壓</button>
+        <button type="button" class="btn-pink" onclick="queryInfo('gnss')" id="gnssBtn">📍 高精度 GNSS</button>
+      </div>
+      <div class="result-box" id="queryResult"></div>
+    </div>
+    
+    <div class="section">
+      <div class="section-title">🌐 網路 Ping 測試</div>
+      <div class="at-input-group">
+        <input type="text" id="manualPingTarget" placeholder="輸入 IP 或域名，例如: 8.8.8.8" value="8.8.8.8">
+        <button type="button" class="btn-warning" id="pingBtn" onclick="if(confirm('確定要執行 Ping 測試嗎？\n這將消耗極少量流量。')) doPing();">🚀 執行 Ping</button>
+      </div>
+      <div class="result-box" id="pingResult"></div>
+    </div>
+    
+    <div class="section">
+      <div class="section-title">✈️ 射頻模組控制</div>
+      <div class="btn-grid">
+        <button type="button" id="flightBtn" onclick="toggleFlightMode()" class="btn-pink">✈️ 切換飛行模式</button>
+        <button type="button" onclick="queryFlightMode()" class="btn-purple">🔍 查詢當前狀態</button>
+      </div>
+      <div class="result-box" id="flightResult"></div>
+    </div>
+  
+    <div class="section">
+      <div class="section-title">📶 蜂窩數據流量總開關</div>
+      <button id="dataToggleBtn" type="button" onclick="toggleData()" class="btn-danger">
+        🚫 目前狀態：已關閉 (點擊以切換)
+      </button>
+    </div>
+
+    <div class="section">
+      <div class="section-title">🔧 網路重置</div>
+      <div class="hint" style="margin-bottom: 12px;">如果設備出現網路連線問題，可以嘗試重置網路配置。</div>
+      <button type="button" onclick="resetNetwork()" class="btn-slate">🔄 重置WIFI網路配置</button>
+    </div>
+
+    <div class="section">
+      <div class="section-title">⚙️ 系統高權限操作</div>
+      <div class="hint" style="margin-bottom: 12px;">點擊重啟將會重置 ESP32 主控，並強制對 4G 模組進行斷電重啟。</div>
+      <button type="button" onclick="rebootSystem()" class="btn-danger">🔄 強制重啟 ESP32 設備</button>
+    </div>
+
+    <div class="section">
+      <div class="section-title">💻 底層 AT 指令終端機</div>
+      <div id="atLog" class="at-terminal">系統已就緒，等待輸入指令...\n</div>
+      <div class="at-input-group">
+        <input type="text" id="atCmd" placeholder="輸入 AT 指令，例如: AT+CSQ">
+        <button type="button" onclick="sendAT()" id="atBtn" class="btn-primary">發送指令</button>
+      </div>
+      <button type="button" class="btn-slate" onclick="document.getElementById('atLog').innerHTML='';" style="margin-top: 12px;">🧹 清空終端機面板</button>
+    </div>
+  </div>
+
+  <div id="simFloatingStatus" class="floating-status float-offline">
+    <div id="simDot" class="status-dot dot-offline"></div>
+    <span id="simText">SIM: 狀態獲取中...</span>
+  </div>
+
+  <script>
+    function checkAuthError(res) {
+      if(res.status === 401) { window.location.href = '/login'; return true; }
+      return false;
+    }
+
+    // 1. 發送簡訊
+    document.getElementById('smsForm').onsubmit = function(e) {
+      e.preventDefault();
+      const btn = document.getElementById('sendSmsBtn');
+      btn.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在發送...'; 
+      btn.disabled = true;
+      const payload = {
+        phone: this.phone.value.trim(),
+        content: this.content.value
+      };
+      fetch('/api/sendsms', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
+      .then(r=>{ if(checkAuthError(r)) throw new Error('Unauthorized'); return r.json(); })
+      .then(res => {
+        alert(res.message); 
+        if(res.success) { this.reset(); document.getElementById('charCount').textContent = '0'; }
+      }).catch(err => { if(err.message !== 'Unauthorized') alert("網路錯誤: " + err); })
+      .finally(() => { btn.innerHTML = '📨 發送簡訊'; btn.disabled = false; });
+    };
+
+    function resetNetwork() {
+      let btn = document.querySelector('button[onclick="resetNetwork()"]');
+      btn.disabled = true;
+      btn.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在重置...';
+      fetch('/api/resetnetwork', { method: 'POST' })
+      .then(res => { if(checkAuthError(res)) throw new Error('Unauthorized'); return res.json(); })
+      .then(data => { alert(data.message); })
+      .catch(err => { if(err.message !== 'Unauthorized') alert("網路錯誤: " + err); })
+      .finally(() => { btn.innerHTML = '🔄 重置WIFI网络配置'; btn.disabled = false; });
+    }
+
+    // 2. 資訊查詢通用函數
+    function queryInfo(t) {
+      let r = document.getElementById('queryResult');
+      r.style.display = 'block'; r.className = 'result-box result-loading'; r.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在查詢模組底層數據...';
+      fetch('/api/query?type='+t)
+      .then(res=>{ if(checkAuthError(res)) throw new Error(); return res.json(); })
+      .then(d => { 
+          r.className = d.success ? 'result-box result-info' : 'result-box result-error';
+          r.innerHTML = d.success ? d.message : '❌ 查詢失敗<br>' + d.message; 
+      }).catch(e=>{ r.className = 'result-box result-error'; r.innerText = '❌ 請求伺服器失敗，請檢查設備連線狀態。';});
+    }
+
+    // 3. Ping 測試
+    function doPing() {
+      let b = document.getElementById('pingBtn'), r = document.getElementById('pingResult'), t = document.getElementById('manualPingTarget').value.trim();
+      if(!t) t = '8.8.8.8';
+      b.disabled = true; b.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> Ping...';
+      r.style.display = 'block'; r.className = 'result-box result-loading';
+      r.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在執行 Ping (4次連發)，請稍候...';
+      isPinging = true;
+      fetch('/api/ping', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ target: t }) })
+      .then(res=>{ if(checkAuthError(res)) throw new Error(); return res.json(); })
+      .then(d => { 
+          b.disabled = false; b.innerHTML = '🚀 執行 Ping';
+          r.className = d.success ? 'result-box result-success' : 'result-box result-error';
+          r.innerHTML = (d.success ? '✅ ' : '❌ Ping 失敗<br>') + d.message; 
+      }).catch(e=>{ b.disabled = false; b.innerHTML = '🚀 執行 Ping'; r.className = 'result-box result-error'; r.innerText = '❌ 請求伺服器失敗。';}).finally(() => { isPinging = false;});
+    }
+
+    // 4. 模組控制 (飛行模式)
+    function queryFlightMode() {
+      let r = document.getElementById('flightResult');
+      r.style.display = 'block'; r.className = 'result-box result-loading'; r.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在查詢飛行模式狀態...';
+      fetch('/api/flight?action=query').then(res=>{ if(checkAuthError(res)) throw new Error(); return res.json(); }).then(d => {
+          r.className = d.success ? 'result-box result-info' : 'result-box result-error'; r.innerHTML = d.success ? d.message : '❌ 查詢失敗: ' + d.message;
+      }).catch(e => { r.className = 'result-box result-error'; r.innerText = '❌ 請求伺服器失敗。'; });
+    }
+    
+    function toggleFlightMode() {
+      if (!confirm('確定要切換飛行模式嗎？\n開啟飛行模式後模組將無法收發簡訊與連接網路。')) return;
+      let b = document.getElementById('flightBtn'), r = document.getElementById('flightResult');
+      b.disabled = true; r.style.display = 'block'; r.className = 'result-box result-loading'; r.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在切換硬體狀態...';
+      fetch('/api/flight?action=toggle').then(res=>{ if(checkAuthError(res)) throw new Error(); return res.json(); }).then(d => {
+          b.disabled = false; r.className = d.success ? 'result-box result-success' : 'result-box result-error';
+          r.innerHTML = (d.success ? '✅ ' : '❌ 切換失敗: ') + d.message;
+      }).catch(e => { b.disabled = false; r.className = 'result-box result-error'; r.innerText = '❌ 請求伺服器失敗。'; });
+    }
+
+    // 6. 系統重啟
+    function rebootSystem() {
+      if(!confirm('🚨 危險操作\n確定要重啟 ESP32 系統嗎？\n重啟期間將短暫斷線，4G 模組也會強制重新上電。')) return;
+      let btn = document.querySelector('button[onclick="rebootSystem()"]');
+      btn.disabled = true; btn.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在執行硬體重啟...';
+      fetch('/api/reboot', {method:'POST'})
+      .then(res=>{ if(checkAuthError(res)) throw new Error(); return res.json(); })
+      .then(d => {
+          alert(d.message);
+          if(d.success) { setTimeout(() => location.reload(), 5000); } 
+      }).catch(e=>{ alert('❌ 請求失敗，設備可能已斷線重啟中，請稍候刷新頁面'); btn.disabled = false; btn.innerHTML = '🔄 強制重啟 ESP32 設備';});
+    }
+
+    let isDataEnabled = false; 
+    function setDataButton(state) {
+      const btn = document.getElementById('dataToggleBtn');
+      if (!btn) return;
+      isDataEnabled = state;
+      if (state) {
+        btn.className = 'btn-success';
+        btn.innerHTML = '✅ 目前狀態：蜂窩數據已開啟 (點擊關閉)';
+      } else {
+        btn.className = 'btn-danger';
+        btn.innerHTML = '🚫 目前狀態：蜂窩數據已關閉 (點擊開啟)';
+      }
+    }
+
+    function toggleData() {
+      const btn = document.getElementById('dataToggleBtn');
+      btn.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在切換底層網路狀態...';
+      fetch('/api/toggledata?state=' + (!isDataEnabled ? 1 : 0), {method: 'POST'})
+      .then(r=>{ if(checkAuthError(r)) throw new Error(); return r.json(); })
+      .then(d => {
+        if (d.success && typeof d.dataNetworkEnabled !== 'undefined') {
+          setDataButton(d.dataNetworkEnabled);
+        } else {
+          setDataButton(!isDataEnabled);
+        }
+      })
+      .catch(e => {
+        console.error('切換數據流量失敗', e);
+        setDataButton(isDataEnabled);
+      });
+    }
+
+    // 7. AT 指令終端機處理
+    function addLog(msg, type = 'resp') {
+      let log = document.getElementById('atLog');
+      let div = document.createElement('div'); 
+      let b = document.createElement('span');
+      b.style.fontWeight = 'bold';
+      if (type === 'user') { 
+          b.style.color = '#fff';
+          b.innerText = '➜ '; 
+          div.style.color = '#fff';
+      } else if (type === 'error') { 
+          b.style.color = '#ef4444';
+          b.innerText = '[ERR] '; 
+          div.style.color = '#ef4444';
+      } else { 
+          b.style.color = '#3b82f6';
+          b.innerText = '◀ '; 
+          div.style.color = '#4ade80';
+      }
+      
+      div.appendChild(b);
+      div.appendChild(document.createTextNode(msg));
+      div.style.marginBottom = '6px';
+      log.appendChild(div); 
+      log.scrollTop = log.scrollHeight;
+    }
+    
+    function sendAT() {
+      let i = document.getElementById('atCmd'), v = i.value.trim();
+      if(!v) return;
+      
+      let btn = document.getElementById('atBtn');
+      btn.disabled = true; 
+      btn.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 執行中...';
+      
+      addLog(v, 'user');
+      i.value = '';
+
+      fetch('/api/at?cmd=' + encodeURIComponent(v))
+        .then(res => { 
+            if(checkAuthError(res)) throw new Error('Unauthorized'); 
+            return res.json(); 
+        })
+        .then(d => {
+            if (d.success) { addLog(d.message); } 
+            else { addLog(d.message, 'error'); }
+        })
+        .catch(e => { 
+            if (e.message !== 'Unauthorized') addLog('請求逾時或設備斷線', 'error'); 
+        })
+        .finally(() => { 
+            btn.disabled = false; 
+            btn.innerHTML = '發送指令'; 
+        });
+    }
+
+    document.getElementById('atCmd').addEventListener('keydown', function(e) { if (e.key === 'Enter') sendAT(); });
+    
+    // 頁面初始化 & 全局狀態輪詢
+    let isPinging = false;
+    function updateSysStatus() {
+      if (isPinging) return;
+      fetch('/api/sysinfo').then(r=>{ if(checkAuthError(r)) throw new Error('Unauthorized'); return r.json(); }).then(data => {
+        if(data.ip) document.getElementById('status').innerHTML = '🌐 設備 IP: <strong>' + data.ip + '</strong> &nbsp;|&nbsp; 韌體版本: <strong style="color:var(--primary);">' + (data.version || '未知') + '</strong>';
+        var widget = document.getElementById('simFloatingStatus');
+        var dot = document.getElementById('simDot');
+        var text = document.getElementById('simText');
+        if(data.cellular) {
+          widget.className = 'floating-status float-online';
+          dot.className = 'status-dot dot-online';
+          text.textContent = 'SIM: 網路已附著';
+        } else {
+          widget.className = 'floating-status float-offline';
+          dot.className = 'status-dot dot-offline';
+          text.textContent = 'SIM: 斷開或未註冊';
+        }
+        if (typeof data.dataNetworkEnabled !== 'undefined') {
+          setDataButton(data.dataNetworkEnabled);
+        }
+      }).catch(e => {});
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      fetch('/api/sysinfo').then(r=>{ if(checkAuthError(r)) throw new Error(); return r.json(); }).then(d => {
+        if(d.ip) document.getElementById('status').innerHTML = '🌐 設備 IP: <strong>' + d.ip + '</strong>';
+        if (d.gnssSupport === false) {
+          const gBtn = document.getElementById('gnssBtn');
+          if (gBtn) gBtn.style.display = 'none';
+        }
+        if (typeof d.dataNetworkEnabled !== 'undefined') {
+          setDataButton(d.dataNetworkEnabled);
+        }
+      }).catch(e=>{});
+      
+      updateSysStatus();
+      setInterval(updateSysStatus, 3000);
+    });
+  </script>
+</body>
+</html>
