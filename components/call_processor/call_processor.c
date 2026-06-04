@@ -1,10 +1,12 @@
 #include "call_processor.h"
 #include "modem_driver.h"
 #include "push_service.h"
+#include "config_manager.h"
 #include "esp_log.h"
-#include "log_service.h"
 #include <string.h>
 #include <time.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "CALL_PROC";
 
@@ -48,6 +50,13 @@ static void handle_call_ringing(void* handler_arg, esp_event_base_t event_base, 
 
     char message[128] = {0};
     snprintf(message, sizeof(message), "来电响铃，号码: %s", caller[0] ? caller : "未知");
+
+    if (!g_app_config.callNotifyEnabled) {
+        ESP_LOGI(TAG, "來電通知已禁用，忽略來電響鈴推送");
+        return;
+    }
+
+    // 直接使用异步推送队列，不再為每次來電创建临时任务
     push_service_send(caller, message, timestamp);
 
     // 这里可以扩展为：

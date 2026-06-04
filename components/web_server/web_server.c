@@ -1,4 +1,5 @@
 #include "web_server.h"
+#include "sdkconfig.h"
 #include "config_manager.h"
 #include "modem_driver.h"
 #include "esp_http_server.h"
@@ -20,7 +21,46 @@
 
 static const char *TAG = "WEB_SRV";
 static httpd_handle_t server = NULL;
+static SemaphoreHandle_t api_config_mutex = NULL;
 static char session_token[33] = {0};
+
+#define WEB_SERVER_MAX_JSON_BODY 1024
+#define WEB_SERVER_API_CONFIG_JSON_SIZE 12288
+#define WEB_SERVER_MAX_QUERY_BUFFER 256
+
+static float get_cpu_usage_percent(void) {
+#if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && defined(CONFIG_FREERTOS_USE_TRACE_FACILITY)
+    TaskStatus_t pxTaskStatusArray[32];
+    volatile UBaseType_t uxArraySize, x;
+    uint32_t ulTotalRunTime, ulStatsAsPercentage;
+    float total_cpu_usage = 0.0f;
+
+    uxArraySize = uxTaskGetNumberOfTasks();
+    if (uxArraySize > sizeof(pxTaskStatusArray) / sizeof(pxTaskStatusArray[0])) {
+        uxArraySize = sizeof(pxTaskStatusArray) / sizeof(pxTaskStatusArray[0]);
+    }
+
+    uxArraySize = uxTaskGetSystemState(pxTaskStatusArray, uxArraySize, &ulTotalRunTime);
+    if (uxArraySize == 0) {
+        return total_cpu_usage;
+    }
+
+    ulTotalRunTime /= 100UL;
+    if (ulTotalRunTime > 0) {
+        for (x = 0; x < uxArraySize; x++) {
+            if (strncmp(pxTaskStatusArray[x].pcTaskName, "IDLE", 4) == 0) {
+                ulStatsAsPercentage = pxTaskStatusArray[x].ulRunTimeCounter / ulTotalRunTime;
+                if (ulStatsAsPercentage > 100) ulStatsAsPercentage = 100;
+                total_cpu_usage = 100.0f - (float)ulStatsAsPercentage;
+                break;
+            }
+        }
+    }
+    return total_cpu_usage;
+#else
+    return 0.0f;
+#endif
+}
 
 // ================= 嵌入式 HTML 资源引用 =================
 extern const uint8_t login_html_start[] asm("_binary_login_html_start");
@@ -55,16 +95,29 @@ static void url_decode(char *dst, const char *src) {
     *dst = '\0';
 }
 
-static char* read_request_body(httpd_req_t *req) {
-    if (req->content_len == 0) return NULL;
-    char *buf = malloc(req->content_len + 1);
-    if (!buf) return NULL;
+static bool read_url_query(httpd_req_t *req, char *query, size_t max_len) {
+    if (!req || !query || max_len == 0) {
+        return false;
+    }
+    size_t query_len = httpd_req_get_url_query_len(req) + 1;
+    if (query_len <= 1) {
+        return false;
+    }
+    if (query_len > max_len) {
+        query_len = max_len;
+    }
+    return httpd_req_get_url_query_str(req, query, query_len) == ESP_OK;
+}
+
+static bool read_request_body_safe(httpd_req_t *req, char *buf, size_t buf_len) {
+    if (!req || !buf || buf_len == 0 || req->content_len == 0 || req->content_len >= buf_len) {
+        return false;
+    }
     if (httpd_req_recv(req, buf, req->content_len) <= 0) {
-        free(buf);
-        return NULL;
+        return false;
     }
     buf[req->content_len] = '\0';
-    return buf;
+    return true;
 }
 
 static const char* skip_json_whitespace(const char *ptr) {
@@ -183,13 +236,18 @@ static bool request_is_json(httpd_req_t *req) {
     return strstr(content_type, "application/json") != NULL;
 }
 
-static void escape_json_string(const char *src, char *dst) {
-    while (*src) {
-        if (*src == '"') { *dst++ = '\\'; *dst++ = '"'; }
-        else if (*src == '\\') { *dst++ = '\\'; *dst++ = '\\'; }
-        else if (*src == '\n') { *dst++ = '\\'; *dst++ = 'n'; }
-        else if (*src == '\r') { *dst++ = '\\'; *dst++ = 'r'; }
-        else { *dst++ = *src; }
+static void escape_json_string(const char *src, char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    size_t remaining = dst_len - 1;
+    while (*src && remaining > 0) {
+        if (*src == '"' && remaining >= 2) { *dst++ = '\\'; *dst++ = '"'; remaining -= 2; }
+        else if (*src == '\\' && remaining >= 2) { *dst++ = '\\'; *dst++ = '\\'; remaining -= 2; }
+        else if (*src == '\n' && remaining >= 2) { *dst++ = '\\'; *dst++ = 'n'; remaining -= 2; }
+        else if (*src == '\r' && remaining >= 2) { *dst++ = '\\'; *dst++ = 'r'; remaining -= 2; }
+        else {
+            *dst++ = *src;
+            remaining -= 1;
+        }
         src++;
     }
     *dst = '\0';
@@ -271,102 +329,112 @@ static esp_err_t handleLogout(httpd_req_t *req) {
 // ================= API: 基础配置与系统 =================
 static esp_err_t handleApiConfig(httpd_req_t *req) {
     if (!check_cookie_auth(req)) return httpd_resp_send_401(req);
-    
-    char* json = calloc(1, 16384);
-    if (!json) return ESP_FAIL;
-
-    char esc_webUser[256] = {0};
-    char esc_webPass[256] = {0};
-    char esc_adminPhone[128] = {0};
-    char *esc_numberBlackList = calloc(1, 2048);
-    char esc_syslogServer[128] = {0};
-    char esc_plmn[32] = {0};
-    char esc_smsc[128] = {0};
-    char esc_imei[128] = {0};
-
-    char *esc_name = calloc(1, 256);
-    char *esc_url = calloc(1, 1024);
-    char *esc_key1 = calloc(1, 256);
-    char *esc_key2 = calloc(1, 256);
-    char *esc_body = calloc(1, 4096);
-    char *esc_phone = calloc(1, 128);
-    char *esc_content = calloc(1, 1024);
-    char *esc_pingTarget = calloc(1, 128);
-
-    if (!esc_numberBlackList || !esc_name || !esc_url || !esc_key1 || !esc_key2 || !esc_body || !esc_phone || !esc_content || !esc_pingTarget) {
-        if(json) free(json);
-        if(esc_numberBlackList) free(esc_numberBlackList); 
-        if(esc_name) free(esc_name); 
-        if(esc_url) free(esc_url); 
-        if(esc_key1) free(esc_key1); 
-        if(esc_key2) free(esc_key2);
-        if(esc_body) free(esc_body); 
-        if(esc_phone) free(esc_phone); 
-        if(esc_content) free(esc_content); 
-        if(esc_pingTarget) free(esc_pingTarget);
+    if (xSemaphoreTake(api_config_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         return ESP_FAIL;
     }
 
-    escape_json_string("admin", esc_webUser);
-    escape_json_string(g_app_config.webPass, esc_webPass);
-    escape_json_string(g_app_config.adminPhone, esc_adminPhone);
-    escape_json_string(g_app_config.numberBlackList, esc_numberBlackList);
-    escape_json_string(g_app_config.syslogServer, esc_syslogServer);
-    escape_json_string(g_app_config.plmn, esc_plmn);
-    escape_json_string(g_app_config.smsc, esc_smsc);
-    escape_json_string(g_app_config.imei, esc_imei);
+    char *json = malloc(WEB_SERVER_API_CONFIG_JSON_SIZE);
+    if (!json) {
+        xSemaphoreGive(api_config_mutex);
+        return ESP_ERR_NO_MEM;
+    }
+    char esc_webUser[128] = {0};
+    char esc_webPass[128] = {0};
+    char esc_adminPhone[64] = {0};
+    char esc_numberBlackList[1024] = {0};
+    char esc_syslogServer[128] = {0};
+    char esc_plmn[32] = {0};
+    char esc_smsc[64] = {0};
+    char esc_imei[64] = {0};
 
-    int pos = snprintf(json, 16384, 
-        "{\"webUser\":\"%s\",\"webPass\":\"%s\",\"adminPhone\":\"%s\",\"numberBlackList\":\"%s\","
+    char esc_name[128] = {0};
+    char esc_url[512] = {0};
+    char esc_key1[128] = {0};
+    char esc_key2[128] = {0};
+    char esc_body[2048] = {0};
+    char esc_phone[64] = {0};
+    char esc_content[512] = {0};
+    char esc_pingTarget[64] = {0};
+
+    escape_json_string("admin", esc_webUser, sizeof(esc_webUser));
+    escape_json_string(g_app_config.webPass, esc_webPass, sizeof(esc_webPass));
+    escape_json_string(g_app_config.adminPhone, esc_adminPhone, sizeof(esc_adminPhone));
+    escape_json_string(g_app_config.numberBlackList, esc_numberBlackList, sizeof(esc_numberBlackList));
+    escape_json_string(g_app_config.syslogServer, esc_syslogServer, sizeof(esc_syslogServer));
+    escape_json_string(g_app_config.plmn, esc_plmn, sizeof(esc_plmn));
+    escape_json_string(g_app_config.smsc, esc_smsc, sizeof(esc_smsc));
+    escape_json_string(g_app_config.imei, esc_imei, sizeof(esc_imei));
+
+    int pos = snprintf(json, WEB_SERVER_API_CONFIG_JSON_SIZE,
+        "{\"webUser\":\"%s\",\"webPass\":\"%s\",\"adminPhone\":\"%s\",\"numberBlackList\":\"%s\"," 
         "\"syslogEnabled\":%s,\"syslogServer\":\"%s\",\"syslogPort\":%d,"
-        "\"plmn\":\"%s\",\"smsc\":\"%s\",\"imei\":\"%s\",\"pushChannels\":[", 
+        "\"plmn\":\"%s\",\"smsc\":\"%s\",\"imei\":\"%s\",\"cronTaskerEnabled\":%s,\"logServiceEnabled\":%s,\"callProcessorEnabled\":%s,\"callNotifyEnabled\":%s,\"pushChannels\":[",
         esc_webUser, esc_webPass, esc_adminPhone, esc_numberBlackList,
         g_app_config.syslogEnabled ? "true" : "false", esc_syslogServer, g_app_config.syslogPort,
-        esc_plmn, esc_smsc, esc_imei);
+        esc_plmn, esc_smsc, esc_imei,
+#if defined(CONFIG_ENABLE_CRON_TASKER) && CONFIG_ENABLE_CRON_TASKER
+        "true",
+#else
+        "false",
+#endif
+#if defined(CONFIG_ENABLE_LOG_SERVICE) && CONFIG_ENABLE_LOG_SERVICE
+        "true",
+#else
+        "false",
+#endif
+#if defined(CONFIG_ENABLE_CALL_PROCESSOR) && CONFIG_ENABLE_CALL_PROCESSOR
+        "true",
+        g_app_config.callNotifyEnabled ? "true" : "false"
+#else
+        "false",
+        "false"
+#endif
+        );
+    if (pos < 0) pos = 0;
+    if (pos >= WEB_SERVER_API_CONFIG_JSON_SIZE) pos = WEB_SERVER_API_CONFIG_JSON_SIZE - 1;
 
     for (int i = 0; i < MAX_PUSH_CHANNELS; i++) {
-        escape_json_string(g_app_config.pushChannels[i].name, esc_name);
-        escape_json_string(g_app_config.pushChannels[i].url, esc_url);
-        escape_json_string(g_app_config.pushChannels[i].key1, esc_key1);
-        escape_json_string(g_app_config.pushChannels[i].key2, esc_key2);
-        escape_json_string(g_app_config.pushChannels[i].customBody, esc_body);
+        escape_json_string(g_app_config.pushChannels[i].name, esc_name, sizeof(esc_name));
+        escape_json_string(g_app_config.pushChannels[i].url, esc_url, sizeof(esc_url));
+        escape_json_string(g_app_config.pushChannels[i].key1, esc_key1, sizeof(esc_key1));
+        escape_json_string(g_app_config.pushChannels[i].key2, esc_key2, sizeof(esc_key2));
+        escape_json_string(g_app_config.pushChannels[i].customBody, esc_body, sizeof(esc_body));
 
-        int written = snprintf(json + pos, 16384 - pos, 
+        int written = snprintf(json + pos, WEB_SERVER_API_CONFIG_JSON_SIZE - pos,
             "{\"enabled\":%s,\"type\":%d,\"name\":\"%s\",\"url\":\"%s\",\"key1\":\"%s\",\"key2\":\"%s\",\"body\":\"%s\"}%s",
             g_app_config.pushChannels[i].enabled ? "true" : "false", g_app_config.pushChannels[i].type,
             esc_name, esc_url, esc_key1, esc_key2, esc_body,
             (i == MAX_PUSH_CHANNELS - 1) ? "]," : ",");
         if (written < 0) written = 0;
-        if (written >= 16384 - pos) written = 16384 - pos - 1;
+        if (written >= WEB_SERVER_API_CONFIG_JSON_SIZE - pos) written = WEB_SERVER_API_CONFIG_JSON_SIZE - pos - 1;
         pos += written;
     }
 
-    int written = snprintf(json + pos, 16384 - pos, "\"cronTasks\":[");
+    int written = snprintf(json + pos, WEB_SERVER_API_CONFIG_JSON_SIZE - pos, "\"cronTasks\":[");
     if (written < 0) written = 0;
-    if (written >= 16384 - pos) written = 16384 - pos - 1;
+    if (written >= WEB_SERVER_API_CONFIG_JSON_SIZE - pos) written = WEB_SERVER_API_CONFIG_JSON_SIZE - pos - 1;
     pos += written;
 
     for (int i = 0; i < MAX_CRON_TASKS; i++) {
-        escape_json_string(g_app_config.cronTasks[i].phone, esc_phone);
-        escape_json_string(g_app_config.cronTasks[i].content, esc_content);
-        escape_json_string(g_app_config.cronTasks[i].pingTarget, esc_pingTarget);
+        escape_json_string(g_app_config.cronTasks[i].phone, esc_phone, sizeof(esc_phone));
+        escape_json_string(g_app_config.cronTasks[i].content, esc_content, sizeof(esc_content));
+        escape_json_string(g_app_config.cronTasks[i].pingTarget, esc_pingTarget, sizeof(esc_pingTarget));
 
-        written = snprintf(json + pos, 16384 - pos, 
+        written = snprintf(json + pos, WEB_SERVER_API_CONFIG_JSON_SIZE - pos,
             "{\"enabled\":%s,\"type\":%d,\"hour\":%d,\"minute\":%d,\"daysInterval\":%d,\"phone\":\"%s\",\"content\":\"%s\",\"pingTarget\":\"%s\"}%s",
             g_app_config.cronTasks[i].enabled ? "true" : "false", g_app_config.cronTasks[i].type,
             g_app_config.cronTasks[i].hour, g_app_config.cronTasks[i].minute, g_app_config.cronTasks[i].daysInterval,
             esc_phone, esc_content, esc_pingTarget,
             (i == MAX_CRON_TASKS - 1) ? "]}" : ",");
         if (written < 0) written = 0;
-        if (written >= 16384 - pos) written = 16384 - pos - 1;
+        if (written >= WEB_SERVER_API_CONFIG_JSON_SIZE - pos) written = WEB_SERVER_API_CONFIG_JSON_SIZE - pos - 1;
         pos += written;
     }
 
     httpd_resp_set_type(req, "application/json");
     esp_err_t res = httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
-    
-    free(json); free(esc_numberBlackList); free(esc_name); free(esc_url); free(esc_key1);
-    free(esc_key2); free(esc_body); free(esc_phone); free(esc_content); free(esc_pingTarget);
+    free(json);
+    xSemaphoreGive(api_config_mutex);
     return res;
 }
 
@@ -376,10 +444,16 @@ static esp_err_t handleSave(httpd_req_t *req) {
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, "{\"success\":false,\"message\":\"Content-Type must be json\"}", HTTPD_RESP_USE_STRLEN);
     }
-    char *body = read_request_body(req);
+    char *body = malloc(4096);
     if (!body) {
         httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, "{\"success\":false,\"message\":\"Empty body\"}", HTTPD_RESP_USE_STRLEN);
+        return httpd_resp_send(req, "{\"success\":false,\"message\":\"Out of memory\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    memset(body, 0, 4096);
+    if (!read_request_body_safe(req, body, 4096)) {
+        free(body);
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"success\":false,\"message\":\"Empty body or body too large\"}", HTTPD_RESP_USE_STRLEN);
     }
 
     strncpy(g_app_config.webUser, "admin", sizeof(g_app_config.webUser) - 1);
@@ -394,13 +468,24 @@ static esp_err_t handleSave(httpd_req_t *req) {
 
     json_get_string_value(body, "adminPhone", g_app_config.adminPhone, sizeof(g_app_config.adminPhone));
     json_get_string_value(body, "numberBlackList", g_app_config.numberBlackList, sizeof(g_app_config.numberBlackList));
+
+#if defined(CONFIG_ENABLE_LOG_SERVICE) && CONFIG_ENABLE_LOG_SERVICE
     json_get_string_value(body, "syslogServer", g_app_config.syslogServer, sizeof(g_app_config.syslogServer));
-    
     bool syslogEnabled = false;
     if (json_get_bool_value(body, "syslogEnabled", &syslogEnabled)) g_app_config.syslogEnabled = syslogEnabled;
     int syslogPort = 0;
     if (json_get_int_value(body, "syslogPort", &syslogPort)) g_app_config.syslogPort = syslogPort;
-    
+#else
+    (void)body;
+#endif
+
+#if defined(CONFIG_ENABLE_CALL_PROCESSOR) && CONFIG_ENABLE_CALL_PROCESSOR
+    bool callNotifyEnabled = false;
+    if (json_get_bool_value(body, "callNotifyEnabled", &callNotifyEnabled)) {
+        g_app_config.callNotifyEnabled = callNotifyEnabled;
+    }
+#endif
+
     json_get_string_value(body, "plmn", g_app_config.plmn, sizeof(g_app_config.plmn));
     json_get_string_value(body, "smsc", g_app_config.smsc, sizeof(g_app_config.smsc));
     json_get_string_value(body, "imei", g_app_config.imei, sizeof(g_app_config.imei));
@@ -453,26 +538,21 @@ static esp_err_t handleSave(httpd_req_t *req) {
         json_get_string_value(body, key, g_app_config.cronTasks[i].pingTarget, sizeof(g_app_config.cronTasks[i].pingTarget));
     }
 
-    free(body);
     config_save_all();
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, "{\"success\":true,\"message\":\"配置已成功保存！\"}", HTTPD_RESP_USE_STRLEN);
+    esp_err_t res = httpd_resp_send(req, "{\"success\":true,\"message\":\"配置已成功保存！\"}", HTTPD_RESP_USE_STRLEN);
+    free(body);
+    return res;
 }
 
 static esp_err_t handleToggleData(httpd_req_t *req) {
     if (!check_cookie_auth(req)) return httpd_resp_send_401(req);
     
     char state_str[16] = {0};
-    size_t query_len = httpd_req_get_url_query_len(req) + 1;
-    if (query_len > 1) {
-        char* query = malloc(query_len);
-        if (query) {
-            if (httpd_req_get_url_query_str(req, query, query_len) == ESP_OK) {
-                httpd_query_key_value(query, "state", state_str, sizeof(state_str));
-            }
-            free(query);
-        }
+    char query[WEB_SERVER_MAX_QUERY_BUFFER];
+    if (read_url_query(req, query, sizeof(query))) {
+        httpd_query_key_value(query, "state", state_str, sizeof(state_str));
     }
 
     // 1. 先校验，后转换
@@ -519,14 +599,20 @@ static esp_err_t handleApiSysInfo(httpd_req_t *req) {
     bool cellular_connected = modem_status == MODEM_NET_STATUS_REGISTERED_HOME || modem_status == MODEM_NET_STATUS_REGISTERED_ROAMING;
     bool data_network_enabled = is_modem_data_allowed();
     bool has_gnss = modem_has_gnss();
+    size_t free_heap = esp_get_free_heap_size();
+    size_t min_free_heap = esp_get_minimum_free_heap_size();
+    float cpu_usage = get_cpu_usage_percent();
 
     char resp_json[320];
     snprintf(resp_json, sizeof(resp_json), 
-             "{\"ip\":\"%s\",\"cellular\":%s,\"dataNetworkEnabled\":%s, \"version\":\"Build: " __DATE__ " " __TIME__ "\", \"gnssSupport\":%s}", 
+             "{\"ip\":\"%s\",\"cellular\":%s,\"dataNetworkEnabled\":%s, \"version\":\"Build: " __DATE__ " " __TIME__ "\", \"gnssSupport\":%s, \"freeHeap\":%u, \"minFreeHeap\":%u, \"cpuUsage\":%.2f}", 
              ip_str,
              cellular_connected ? "true" : "false",
              data_network_enabled ? "true" : "false",
-             has_gnss ? "true" : "false");
+             has_gnss ? "true" : "false",
+             free_heap,
+             min_free_heap,
+             cpu_usage);
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, resp_json, HTTPD_RESP_USE_STRLEN);
@@ -648,15 +734,12 @@ static esp_err_t handleSmsc(httpd_req_t *req) {
             httpd_resp_set_type(req, "application/json");
             return httpd_resp_send(req, "{\"success\":false,\"message\":\"Content-Type must be application/json\"}", HTTPD_RESP_USE_STRLEN);
         }
-        char* buf = malloc(req->content_len + 1);
-        if (!buf || httpd_req_recv(req, buf, req->content_len) <= 0) { 
-            if(buf) { free(buf); } 
-            return ESP_FAIL; 
+        char buf[WEB_SERVER_MAX_JSON_BODY] = {0};
+        if (!read_request_body_safe(req, buf, sizeof(buf))) {
+            return ESP_FAIL;
         }
-        buf[req->content_len] = '\0';
         char smsc[32] = {0};
         json_get_string_value(buf, "smsc", smsc, sizeof(smsc));
-        free(buf);
         if (strlen(smsc) == 0) {
             httpd_resp_set_type(req, "application/json");
             return httpd_resp_send(req, "{\"success\":false,\"message\":\"SMSC 号码不能为空\"}", HTTPD_RESP_USE_STRLEN);
@@ -675,16 +758,13 @@ static esp_err_t handleSendSms(httpd_req_t *req) {
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, "{\"success\":false,\"message\":\"Content-Type must be application/json\"}", HTTPD_RESP_USE_STRLEN);
     }
-    char* buf = malloc(req->content_len + 1);
-    if (!buf || httpd_req_recv(req, buf, req->content_len) <= 0) { 
-        if(buf) { free(buf); } 
-        return ESP_FAIL; 
+    char buf[WEB_SERVER_MAX_JSON_BODY] = {0};
+    if (!read_request_body_safe(req, buf, sizeof(buf))) {
+        return ESP_FAIL;
     }
-    buf[req->content_len] = '\0';
     char phone[32] = {0}, content[256] = {0};
     json_get_string_value(buf, "phone", phone, sizeof(phone));
     json_get_string_value(buf, "content", content, sizeof(content));
-    free(buf);
     
     esp_err_t err = modem_send_sms_text(phone, content, 10000);
     httpd_resp_set_type(req, "application/json");
@@ -706,30 +786,20 @@ static esp_err_t handlePing(httpd_req_t *req) {
             httpd_resp_set_type(req, "application/json");
             return httpd_resp_send(req, "{\"success\":false,\"message\":\"Content-Type must be application/json\"}", HTTPD_RESP_USE_STRLEN);
         }
-        char* buf = malloc(req->content_len + 1);
-        if (!buf || httpd_req_recv(req, buf, req->content_len) <= 0) { 
-            if (buf) { 
-                free(buf); 
-            } 
-            return ESP_FAIL; 
+        char buf[WEB_SERVER_MAX_JSON_BODY] = {0};
+        if (!read_request_body_safe(req, buf, sizeof(buf))) {
+            return ESP_FAIL;
         }
-        buf[req->content_len] = '\0';
         json_get_string_value(buf, "target", target, sizeof(target));
-        free(buf);
     }
     
     if (strlen(target) == 0) {
         strcpy(target, "8.8.8.8");
     }
 
-    char *msg_buf   = calloc(1, 1024);
-    char *json_buf  = calloc(1, 2048);
-    if (!msg_buf || !json_buf) {
-        if (msg_buf) { free(msg_buf); }
-        if (json_buf) { free(json_buf); }
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
+    char msg_buf[512] = {0};
+    char json_buf[1024] = {0};
+    char escaped_msg[1024] = {0};
 
     int successCount = 0;
     int avgRtt = 0;
@@ -739,28 +809,16 @@ static esp_err_t handlePing(httpd_req_t *req) {
     bool has_error = (err != ESP_OK);
 
     if (isSuccess) {
-        snprintf(msg_buf, 1024, "發送 4 次，成功 %d 次。\n平均延時: %d ms\n\n%s", successCount, avgRtt, details);
+        snprintf(msg_buf, sizeof(msg_buf), "發送 4 次，成功 %d 次。\n平均延時: %d ms\n\n%s", successCount, avgRtt, details);
     } else {
-        strcpy(msg_buf, "4 次 Ping 均超時或失敗，請檢查網路或目標地址。");
-        if (has_error) {
-            strncat(msg_buf, "\n底層響應有誤或未开启数据连接", 1024 - strlen(msg_buf) - 1);
-        }
+        snprintf(msg_buf, sizeof(msg_buf), "4 次 Ping 均超時或失敗，請檢查網路或目標地址。%s", has_error ? "\n底層響應有誤或未开启数据连接" : "");
     }
 
-    char *escaped_msg = calloc(1, 2048);
-    if (escaped_msg) {
-        escape_json_string(msg_buf, escaped_msg);
-        snprintf(json_buf, 2048, "{\"success\":%s,\"message\":\"%s\"}", isSuccess ? "true" : "false", escaped_msg);
-        free(escaped_msg);
-    } else {
-        snprintf(json_buf, 2048, "{\"success\":false,\"message\":\"Memory allocation failed\"}");
-    }
+    escape_json_string(msg_buf, escaped_msg, sizeof(escaped_msg));
+    snprintf(json_buf, sizeof(json_buf), "{\"success\":%s,\"message\":\"%s\"}", isSuccess ? "true" : "false", escaped_msg);
 
     httpd_resp_set_type(req, "application/json");
-    esp_err_t ret = httpd_resp_send(req, json_buf, HTTPD_RESP_USE_STRLEN);
-    free(msg_buf);
-    free(json_buf);
-    return ret;
+    return httpd_resp_send(req, json_buf, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t handleResetNetwork(httpd_req_t *req) {
@@ -787,26 +845,18 @@ static esp_err_t handleQuery(httpd_req_t *req) {
     if (!check_cookie_auth(req)) return httpd_resp_send_401(req);
 
     char type[32] = {0};
-    size_t query_len = httpd_req_get_url_query_len(req) + 1;
-    if (query_len > 1) {
-        char* query = malloc(query_len);
-        if (httpd_req_get_url_query_str(req, query, query_len) == ESP_OK) {
-            httpd_query_key_value(query, "type", type, sizeof(type));
-        }
-        free(query);
+    char query[WEB_SERVER_MAX_QUERY_BUFFER];
+    if (read_url_query(req, query, sizeof(query))) {
+        httpd_query_key_value(query, "type", type, sizeof(type));
     }
 
-    char *resp_buf = calloc(1, 2048); char *msg_buf  = calloc(1, 2048); char *json_buf = calloc(1, 4096);
-    if (!resp_buf || !msg_buf || !json_buf) {
-        if(resp_buf) { free(resp_buf); }
-        if(msg_buf) { free(msg_buf); }
-        if(json_buf) { free(json_buf); }
-        httpd_resp_send_500(req); return ESP_FAIL;
-    }
+    char resp_buf[1024] = {0};
+    char msg_buf[1024] = {0};
+    char json_buf[2048] = {0};
 
     bool success = false;
     if (strcmp(type, "ati") == 0) {
-        if (modem_send_at_command("ATI", resp_buf, 2048, 2000) == ESP_OK && strstr(resp_buf, "OK")) {
+        if (modem_send_at_command("ATI", resp_buf, sizeof(resp_buf), 2000) == ESP_OK && strstr(resp_buf, "OK")) {
             success = true; char *line1="未知", *line2="未知", *line3="未知";
             char *saveptr; char *token = strtok_r(resp_buf, "\r\n", &saveptr);
             int num = 0;
@@ -816,53 +866,53 @@ static esp_err_t handleQuery(httpd_req_t *req) {
                 }
                 token = strtok_r(NULL, "\r\n", &saveptr);
             }
-            snprintf(msg_buf, 2048, "<table class='info-table'><tr><td>製造商</td><td>%s</td></tr><tr><td>型號</td><td>%s</td></tr><tr><td>版本</td><td>%s</td></tr></table>", line1, line2, line3);
+            snprintf(msg_buf, sizeof(msg_buf), "<table class='info-table'><tr><td>製造商</td><td>%s</td></tr><tr><td>型號</td><td>%s</td></tr><tr><td>版本</td><td>%s</td></tr></table>", line1, line2, line3);
         } else strcpy(msg_buf, "查詢失敗");
     } else if (strcmp(type, "signal") == 0) {
-        if (modem_send_at_command("AT+CESQ", resp_buf, 2048, 2000) == ESP_OK && strstr(resp_buf, "+CESQ:")) {
+        if (modem_send_at_command("AT+CESQ", resp_buf, sizeof(resp_buf), 2000) == ESP_OK && strstr(resp_buf, "+CESQ:")) {
             success = true; char *p = strstr(resp_buf, "+CESQ:") + 6;
             int v[6] = {0}; sscanf(p, "%d,%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
             char rsrpStr[32], rsrqStr[32];
             if (v[5] == 99 || v[5] == 255) strcpy(rsrpStr, "未知"); else snprintf(rsrpStr, sizeof(rsrpStr), "%d dBm", -140 + v[5]);
             if (v[4] == 99 || v[4] == 255) strcpy(rsrqStr, "未知"); else snprintf(rsrqStr, sizeof(rsrqStr), "%.1f dB", -19.5 + v[4] * 0.5);
             for (int i=0; p[i]; i++) { if (p[i]=='\r'||p[i]=='\n') { p[i]='\0'; break; } }
-            snprintf(msg_buf, 2048, "<table class='info-table'><tr><td>RSRP</td><td>%s</td></tr><tr><td>RSRQ</td><td>%s</td></tr><tr><td>原始數據</td><td>%s</td></tr></table>", rsrpStr, rsrqStr, p);
+            snprintf(msg_buf, sizeof(msg_buf), "<table class='info-table'><tr><td>RSRP</td><td>%s</td></tr><tr><td>RSRQ</td><td>%s</td></tr><tr><td>原始數據</td><td>%s</td></tr></table>", rsrpStr, rsrqStr, p);
         } else strcpy(msg_buf, "查詢失敗");
     } else if (strcmp(type, "siminfo") == 0) {
         success = true; char imsi[32] = "未知", iccid[32] = "未知", num[32] = "未儲存";
-        if (modem_send_at_command("AT+CIMI", resp_buf, 2048, 2000) == ESP_OK) {
+        if (modem_send_at_command("AT+CIMI", resp_buf, sizeof(resp_buf), 2000) == ESP_OK) {
             char *start = NULL;
             for(int i=0; resp_buf[i]; i++) { if (isdigit((unsigned char)resp_buf[i]) && isdigit((unsigned char)resp_buf[i+1])) { start = &resp_buf[i]; break; } }
             if (start) { for(int i=0; i<sizeof(imsi)-1 && isdigit((unsigned char)start[i]); i++) { imsi[i] = start[i]; imsi[i+1] = '\0'; } }
         }
-        if (modem_send_at_command("AT+ICCID", resp_buf, 2048, 2000) == ESP_OK) {
+        if (modem_send_at_command("AT+ICCID", resp_buf, sizeof(resp_buf), 2000) == ESP_OK) {
             char *p = strstr(resp_buf, "+ICCID:");
             if (p) { p+=7; while(*p==' ') p++; for(int i=0; i<sizeof(iccid)-1 && (isdigit((unsigned char)p[i]) || isalpha((unsigned char)p[i])); i++) { iccid[i]=p[i]; iccid[i+1]='\0'; } }
         }
-        if (modem_send_at_command("AT+CNUM", resp_buf, 2048, 2000) == ESP_OK) {
+        if (modem_send_at_command("AT+CNUM", resp_buf, sizeof(resp_buf), 2000) == ESP_OK) {
             char *p = strstr(resp_buf, ",\"");
             if (p) { p+=2; char *e = strchr(p, '"'); if (e && (e-p)<sizeof(num)) { strncpy(num, p, e-p); num[e-p]='\0'; } }
         }
-        snprintf(msg_buf, 2048, "<table class='info-table'><tr><td>IMSI</td><td>%s</td></tr><tr><td>ICCID</td><td>%s</td></tr><tr><td>本機號碼</td><td>%s</td></tr></table>", imsi, iccid, num);
+        snprintf(msg_buf, sizeof(msg_buf), "<table class='info-table'><tr><td>IMSI</td><td>%s</td></tr><tr><td>ICCID</td><td>%s</td></tr><tr><td>本機號碼</td><td>%s</td></tr></table>", imsi, iccid, num);
     } else if (strcmp(type, "network") == 0) {
         success = true; char reg[32] = "斷開/未註冊", op[32] = "未知", cgact[32] = "未激活", apn[32] = "未知";
-        if (modem_send_at_command("AT+CEREG?", resp_buf, 2048, 2000) == ESP_OK) { if (strstr(resp_buf, ",1") || strstr(resp_buf, ",5")) strcpy(reg, "已附著/註冊"); }
-        if (modem_send_at_command("AT+COPS?", resp_buf, 2048, 2000) == ESP_OK) { char *p = strstr(resp_buf, ",\""); if (p) { p+=2; char *e=strchr(p,'"'); if (e) { strncpy(op, p, e-p); op[e-p]='\0'; } } }
-        if (modem_send_at_command("AT+CGACT?", resp_buf, 2048, 2000) == ESP_OK) { if (strstr(resp_buf, "+CGACT: 1,1")) strcpy(cgact, "已激活"); }
-        if (modem_send_at_command("AT+CGDCONT?", resp_buf, 2048, 2000) == ESP_OK) { char *p = strstr(resp_buf, ",\""); if (p) { p=strstr(p+2, ",\""); if(p){ p+=2; char *e=strchr(p,'"'); if(e){ strncpy(apn,p,e-p); apn[e-p]='\0';} } } }
-        snprintf(msg_buf, 2048, "<table class='info-table'><tr><td>註冊狀態</td><td>%s</td></tr><tr><td>電信商</td><td>%s</td></tr><tr><td>數據連接</td><td>%s</td></tr><tr><td>APN</td><td>%s</td></tr></table>", reg, op, cgact, apn);
+        if (modem_send_at_command("AT+CEREG?", resp_buf, sizeof(resp_buf), 2000) == ESP_OK) { if (strstr(resp_buf, ",1") || strstr(resp_buf, ",5")) strcpy(reg, "已附著/註冊"); }
+        if (modem_send_at_command("AT+COPS?", resp_buf, sizeof(resp_buf), 2000) == ESP_OK) { char *p = strstr(resp_buf, ",\""); if (p) { p+=2; char *e=strchr(p,'"'); if (e) { strncpy(op, p, e-p); op[e-p]='\0'; } } }
+        if (modem_send_at_command("AT+CGACT?", resp_buf, sizeof(resp_buf), 2000) == ESP_OK) { if (strstr(resp_buf, "+CGACT: 1,1")) strcpy(cgact, "已激活"); }
+        if (modem_send_at_command("AT+CGDCONT?", resp_buf, sizeof(resp_buf), 2000) == ESP_OK) { char *p = strstr(resp_buf, ",\""); if (p) { p=strstr(p+2, ",\""); if(p){ p+=2; char *e=strchr(p,'"'); if(e){ strncpy(apn,p,e-p); apn[e-p]='\0';} } } }
+        snprintf(msg_buf, sizeof(msg_buf), "<table class='info-table'><tr><td>註冊狀態</td><td>%s</td></tr><tr><td>電信商</td><td>%s</td></tr><tr><td>數據連接</td><td>%s</td></tr><tr><td>APN</td><td>%s</td></tr></table>", reg, op, cgact, apn);
     } else if (strcmp(type, "wifi") == 0) {
         success = true;
         wifi_ap_record_t ap_info;
         esp_netif_ip_info_t ip_info;
         esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
         if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK && netif && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
-            snprintf(msg_buf, 2048, "<table class='info-table'><tr><td>連接狀態</td><td>已連接</td></tr><tr><td>SSID</td><td>%s</td></tr><tr><td>RSSI</td><td>%d dBm</td></tr><tr><td>IP</td><td>" IPSTR "</td></tr></table>", ap_info.ssid, ap_info.rssi, IP2STR(&ip_info.ip));
+            snprintf(msg_buf, sizeof(msg_buf), "<table class='info-table'><tr><td>連接狀態</td><td>已連接</td></tr><tr><td>SSID</td><td>%s</td></tr><tr><td>RSSI</td><td>%d dBm</td></tr><tr><td>IP</td><td>" IPSTR "</td></tr></table>", ap_info.ssid, ap_info.rssi, IP2STR(&ip_info.ip));
         } else {
-            snprintf(msg_buf, 2048, "<table class='info-table'><tr><td>連接狀態</td><td>未連接</td></tr></table>");
+            snprintf(msg_buf, sizeof(msg_buf), "<table class='info-table'><tr><td>連接狀態</td><td>未連接</td></tr></table>");
         }
     } else if (strcmp(type, "cellip") == 0) {
-        if (modem_send_at_command("AT+CGPADDR", resp_buf, 2048, 2000) == ESP_OK && strstr(resp_buf, "+CGPADDR:")) {
+        if (modem_send_at_command("AT+CGPADDR", resp_buf, sizeof(resp_buf), 2000) == ESP_OK && strstr(resp_buf, "+CGPADDR:")) {
             success = true;
             strcpy(msg_buf, "<table class='info-table'><tr><th>CID (上下文)</th><th>IP 位址 (IPv4 / IPv6)</th></tr>");
             char *p = resp_buf;
@@ -904,7 +954,7 @@ static esp_err_t handleQuery(httpd_req_t *req) {
             const char* lat_dir = (loc.latitude >= 0) ? "N" : "S";
             const char* lon_dir = (loc.longitude >= 0) ? "E" : "W";
 
-            snprintf(msg_buf, 2048, 
+            snprintf(msg_buf, sizeof(msg_buf), 
                 "<table class='info-table'>"
                 "<tr><td>GNSS状态</td><td>🟢 定位成功 (卫星数: %d)</td></tr>"
                 "<tr><td>纬度</td><td>%.6f °%s</td></tr>"
@@ -922,7 +972,7 @@ static esp_err_t handleQuery(httpd_req_t *req) {
         } else {
             // 3. 没定位成功时，不再发 AT 指令，而是直接看 GGA 报文有没有抓到卫星
             if (loc.satellites > 0) {
-                snprintf(msg_buf, 2048, "⚠️ 已发现 %d 颗卫星，等待信号增强以获取有效坐标...(可能需要1-3分钟)", loc.satellites);
+                snprintf(msg_buf, sizeof(msg_buf), "⚠️ 已发现 %d 颗卫星，等待信号增强以获取有效坐标...(可能需要1-3分钟)", loc.satellites);
             } else {
                 strcpy(msg_buf, "🛰️ GNSS 启动成功，搜星中... (请确保天线已接好并置于窗外或室外空旷处)");
             }
@@ -932,8 +982,8 @@ static esp_err_t handleQuery(httpd_req_t *req) {
         char vbat[32] = "未知", temp[32] = "未知";
         
         // 1. 查询电压
-        memset(resp_buf, 0, 2048);
-        if (modem_send_at_command("AT+MCHIPINFO=\"vbat\"", resp_buf, 2048, 2000) == ESP_OK) {
+        memset(resp_buf, 0, sizeof(resp_buf));
+        if (modem_send_at_command("AT+MCHIPINFO=\"vbat\"", resp_buf, sizeof(resp_buf), 2000) == ESP_OK) {
             char *p = strstr(resp_buf, "+MCHIPINFO:");
             if (p) {
                 // 查找第一个逗号后的内容
@@ -943,8 +993,8 @@ static esp_err_t handleQuery(httpd_req_t *req) {
         }
         
         // 2. 查询温度
-        memset(resp_buf, 0, 2048);
-        if (modem_send_at_command("AT+MCHIPINFO=\"temp\"", resp_buf, 2048, 2000) == ESP_OK) {
+        memset(resp_buf, 0, sizeof(resp_buf));
+        if (modem_send_at_command("AT+MCHIPINFO=\"temp\"", resp_buf, sizeof(resp_buf), 2000) == ESP_OK) {
             char *p = strstr(resp_buf, "+MCHIPINFO:");
             if (p) {
                 char *val = strchr(p, ',');
@@ -955,7 +1005,7 @@ static esp_err_t handleQuery(httpd_req_t *req) {
         // 3. 结果判断
         if (strcmp(vbat, "未知") != 0 || strcmp(temp, "未知") != 0) {
             success = true;
-            snprintf(msg_buf, 2048, 
+            snprintf(msg_buf, sizeof(msg_buf), 
                 "<table class='info-table'>"
                 "<tr><td>Core Power (VBAT)</td><td>%s</td></tr>"
                 "<tr><td>Chip Temp (TEMP)</td><td>%s</td></tr>"
@@ -965,29 +1015,23 @@ static esp_err_t handleQuery(httpd_req_t *req) {
         }
     } else strcpy(msg_buf, "暂不支持此查询类型");
 
-    char *escaped_msg = calloc(1, 4096);
-    if (escaped_msg) {
-        escape_json_string(msg_buf, escaped_msg);
-        snprintf(json_buf, 4096, "{\"success\":%s,\"message\":\"%s\"}", success ? "true" : "false", escaped_msg);
-        free(escaped_msg);
-    } else snprintf(json_buf, 4096, "{\"success\":false}");
+    char escaped_msg[2048] = {0};
+    escape_json_string(msg_buf, escaped_msg, sizeof(escaped_msg));
+    snprintf(json_buf, sizeof(json_buf), "{\"success\":%s,\"message\":\"%s\"}", success ? "true" : "false", escaped_msg);
 
     httpd_resp_set_type(req, "application/json");
-    esp_err_t ret = httpd_resp_send(req, json_buf, HTTPD_RESP_USE_STRLEN);
-    free(resp_buf); free(msg_buf); free(json_buf);
-    return ret;
+    return httpd_resp_send(req, json_buf, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t handleFlightMode(httpd_req_t *req) {
     if (!check_cookie_auth(req)) return httpd_resp_send_401(req);
     char action[32] = {0};
-    size_t query_len = httpd_req_get_url_query_len(req) + 1;
-    if (query_len > 1) {
-        char* query = malloc(query_len);
-        if (httpd_req_get_url_query_str(req, query, query_len) == ESP_OK) httpd_query_key_value(query, "action", action, sizeof(action));
-        free(query);
+    char query[WEB_SERVER_MAX_QUERY_BUFFER];
+    if (read_url_query(req, query, sizeof(query))) {
+        httpd_query_key_value(query, "action", action, sizeof(action));
     }
     char resp_buf[128] = {0}; char json[512] = {0};
+    strcpy(json, "{\"success\":false,\"message\":\"查询失败\"}");
     if (strcmp(action, "query") == 0) {
         if (modem_send_at_command("AT+CFUN?", resp_buf, sizeof(resp_buf), 2000) == ESP_OK) {
             char *p = strstr(resp_buf, "+CFUN:");
@@ -1029,20 +1073,15 @@ static esp_err_t handleATCommand(httpd_req_t *req) {
     char cmd[128] = {0};
 
     if (req->method == HTTP_POST) {
-        char *body = read_request_body(req);
-        if (body) {
+        char body[WEB_SERVER_MAX_JSON_BODY] = {0};
+        if (read_request_body_safe(req, body, sizeof(body))) {
             json_get_string_value(body, "cmd", cmd, sizeof(cmd));
-            free(body);
         }
     } else {
-        size_t query_len = httpd_req_get_url_query_len(req) + 1;
-        if (query_len > 1) {
-            char* query = malloc(query_len);
-            if (query && httpd_req_get_url_query_str(req, query, query_len) == ESP_OK) {
-                httpd_query_key_value(query, "cmd", cmd, sizeof(cmd));
-                url_decode(cmd, cmd);
-            }
-            free(query);
+        char query[WEB_SERVER_MAX_QUERY_BUFFER];
+        if (read_url_query(req, query, sizeof(query))) {
+            httpd_query_key_value(query, "cmd", cmd, sizeof(cmd));
+            url_decode(cmd, cmd);
         }
     }
 
@@ -1051,31 +1090,21 @@ static esp_err_t handleATCommand(httpd_req_t *req) {
         return httpd_resp_send(req, "{\"success\":false,\"message\":\"缺少 AT 指令\"}", HTTPD_RESP_USE_STRLEN);
     }
 
-    char *resp_buf = calloc(1, 2048);
-    char *json = calloc(1, 4096);
-    if (!resp_buf || !json) {
-        if(resp_buf) { free(resp_buf); }
-        if(json) { free(json); }
-        return ESP_FAIL;
-    }
+    char resp_buf[1024] = {0};
+    char json[2048] = {0};
+    char escaped[2048] = {0};
 
-    esp_err_t err = modem_send_at_command(cmd, resp_buf, 2048, 10000);
+    esp_err_t err = modem_send_at_command(cmd, resp_buf, sizeof(resp_buf), 10000);
 
     if (err == ESP_OK) {
-        char *escaped = calloc(1, 4096);
-        escape_json_string(resp_buf, escaped);
-        snprintf(json, 4096, "{\"success\":true,\"message\":\"%s\"}", escaped);
-        free(escaped);
+        escape_json_string(resp_buf, escaped, sizeof(escaped));
+        snprintf(json, sizeof(json), "{\"success\":true,\"message\":\"%s\"}", escaped);
     } else {
-        snprintf(json, 4096, "{\"success\":false,\"message\":\"指令执行超时或出错\"}");
+        snprintf(json, sizeof(json), "{\"success\":false,\"message\":\"指令执行超时或出错\"}");
     }
 
     httpd_resp_set_type(req, "application/json");
-    esp_err_t ret = httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
-
-    free(resp_buf);
-    free(json);
-    return ret;
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
 
 // ================= 服务注册与启动 =================
@@ -1086,12 +1115,21 @@ static esp_err_t handleATCommand(httpd_req_t *req) {
 
 esp_err_t web_server_start(void) {
     if (server != NULL) return ESP_OK;
+
+    if (api_config_mutex == NULL) {
+        api_config_mutex = xSemaphoreCreateMutex();
+        if (!api_config_mutex) {
+            ESP_LOGE(TAG, "无法创建 API 配置互斥锁");
+            return ESP_FAIL;
+        }
+    }
+
     snprintf(session_token, sizeof(session_token), "%08X%08X", (unsigned int)esp_random(), (unsigned int)esp_random());
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 25;
     config.stack_size = 8192;
-    config.max_open_sockets = 7;
+    config.max_open_sockets = 4;
     
     if (httpd_start(&server, &config) == ESP_OK) {
         REG_URI("/login", HTTP_GET, handleLogin);

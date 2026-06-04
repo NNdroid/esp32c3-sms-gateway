@@ -1,9 +1,10 @@
 #ifndef LOG_SERVICE_H
 #define LOG_SERVICE_H
 
+#include "sdkconfig.h"
 #include <stdbool.h>
-#include "esp_log.h"
 #include <stdarg.h>
+#include "esp_log.h"
 
 void log_service_init(void);
 void log_service_set_ready(bool ready);

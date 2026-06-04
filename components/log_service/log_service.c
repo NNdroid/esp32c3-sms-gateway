@@ -1,3 +1,4 @@
+#include "sdkconfig.h"
 #include "log_service.h"
 #include "config_manager.h"
 
@@ -11,11 +12,30 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include "esp_netif.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
+#if CONFIG_ENABLE_LOG_SERVICE
 
 #define SYSLOG_MAX_MESSAGE 384
 #define SYSLOG_HOSTNAME_MAX 64
+#define SYSLOG_QUEUE_SIZE 20
+#define SYSLOG_PAYLOAD_MAX (SYSLOG_MAX_MESSAGE + 128)
+
+typedef struct {
+    char payload[SYSLOG_PAYLOAD_MAX];
+} syslog_item_t;
 
 static bool log_service_forwarding_ready = false;
+static QueueHandle_t syslog_queue = NULL;
+static char cached_hostname[SYSLOG_HOSTNAME_MAX] = {0};
+static bool cached_hostname_ready = false;
+static char cached_syslog_server[SYSLOG_HOSTNAME_MAX] = {0};
+static int cached_syslog_port = 0;
+static struct sockaddr_in cached_syslog_addr = {0};
+static int cached_syslog_socket = -1;
+static bool cached_syslog_ready = false;
 
 static bool log_service_should_forward(void) {
     return log_service_forwarding_ready && g_app_config.syslogEnabled && g_app_config.syslogServer[0] != '\0' && g_app_config.syslogPort > 0;
@@ -54,11 +74,14 @@ static void log_service_get_hostname(char* out, size_t len) {
     if (len == 0) {
         return;
     }
-    if (gethostname(out, len) == 0) {
-        out[len - 1] = '\0';
-        return;
+    if (!cached_hostname_ready) {
+        if (gethostname(cached_hostname, sizeof(cached_hostname)) != 0 || cached_hostname[0] == '\0') {
+            strncpy(cached_hostname, "-", sizeof(cached_hostname));
+            cached_hostname[sizeof(cached_hostname) - 1] = '\0';
+        }
+        cached_hostname_ready = true;
     }
-    strncpy(out, "-", len);
+    strncpy(out, cached_hostname, len);
     out[len - 1] = '\0';
 }
 
@@ -98,76 +121,118 @@ static void log_service_build_syslog_payload(int level, const char* tag, const c
     log_service_get_ipaddr(ip_address, sizeof(ip_address));
 
     int pri = 16 + log_service_severity(level);
-    snprintf(out, out_len, "<%d>1 %s %s %s %s - %s: %s",
-             pri,
-             timestamp,
-             hostname,
-             ip_address,
-             hostname,
-             tag,
-             message);
+    int len = snprintf(out, out_len, "<%d>1 %s %s %s %s - %s: ",
+                       pri,
+                       timestamp,
+                       hostname,
+                       ip_address,
+                       hostname,
+                       tag);
+    if (len < 0 || (size_t)len >= out_len) {
+        if (out_len > 0) {
+            out[out_len - 1] = '\0';
+        }
+        return;
+    }
+
+    snprintf(out + len, out_len - (size_t)len, "%s", message);
+}
+
+static bool log_service_resolve_server(const char* server, int port) {
+    if (!server || server[0] == '\0' || port <= 0) {
+        return false;
+    }
+
+    if (cached_syslog_ready && cached_syslog_port == port && strcmp(cached_syslog_server, server) == 0) {
+        return true;
+    }
+
+    if (cached_syslog_socket >= 0) {
+        close(cached_syslog_socket);
+        cached_syslog_socket = -1;
+    }
+    cached_syslog_ready = false;
+
+    struct in_addr addr;
+    if (inet_pton(AF_INET, server, &addr) == 1) {
+        cached_syslog_addr.sin_family = AF_INET;
+        cached_syslog_addr.sin_port = htons(port);
+        cached_syslog_addr.sin_addr = addr;
+    } else {
+        struct addrinfo hints;
+        struct addrinfo* result = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+
+        char port_str[16];
+        snprintf(port_str, sizeof(port_str), "%d", port);
+        if (getaddrinfo(server, port_str, &hints, &result) != 0 || result == NULL) {
+            return false;
+        }
+
+        memcpy(&cached_syslog_addr, result->ai_addr, sizeof(cached_syslog_addr));
+        freeaddrinfo(result);
+    }
+
+    cached_syslog_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (cached_syslog_socket < 0) {
+        return false;
+    }
+
+    strncpy(cached_syslog_server, server, sizeof(cached_syslog_server) - 1);
+    cached_syslog_server[sizeof(cached_syslog_server) - 1] = '\0';
+    cached_syslog_port = port;
+    cached_syslog_ready = true;
+    return true;
 }
 
 static bool log_service_send_udp(const char* server, int port, const char* payload) {
-    struct addrinfo hints;
-    struct addrinfo* result = NULL;
-    char port_str[8];
-    int sock = -1;
-    bool success = false;
-
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-
-    snprintf(port_str, sizeof(port_str), "%d", port);
-    if (getaddrinfo(server, port_str, &hints, &result) != 0 || result == NULL) {
+    if (!log_service_resolve_server(server, port)) {
         return false;
     }
 
-    sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-    if (sock < 0) {
-        freeaddrinfo(result);
-        return false;
-    }
-
-    ssize_t sent = sendto(sock, payload, strlen(payload), 0, result->ai_addr, result->ai_addrlen);
+    ssize_t sent = sendto(cached_syslog_socket, payload, strlen(payload), 0,
+                          (struct sockaddr*)&cached_syslog_addr, sizeof(cached_syslog_addr));
     if (sent == (ssize_t)strlen(payload)) {
-        success = true;
+        return true;
     }
 
-    close(sock);
-    freeaddrinfo(result);
-    return success;
+    close(cached_syslog_socket);
+    cached_syslog_socket = -1;
+    cached_syslog_ready = false;
+    return false;
+}
+
+static void syslog_worker_task(void *pvParameters) {
+    syslog_item_t item;
+    while (1) {
+        if (xQueueReceive(syslog_queue, &item, portMAX_DELAY) == pdTRUE) {
+            if (log_service_should_forward()) {
+                log_service_send_udp(g_app_config.syslogServer, g_app_config.syslogPort, item.payload);
+            }
+        }
+    }
 }
 
 static void log_service_vsyslog(int level, const char* tag, const char* format, va_list ap) {
-    va_list ap_copy;
-    va_copy(ap_copy, ap);
+    if (!syslog_queue) return;
 
-    char* message = malloc(SYSLOG_MAX_MESSAGE);
-    if (message == NULL) {
-        va_end(ap_copy);
-        return;
-    }
-    vsnprintf(message, SYSLOG_MAX_MESSAGE, format, ap_copy);
-    va_end(ap_copy);
+    char message[SYSLOG_MAX_MESSAGE];
+    vsnprintf(message, sizeof(message), format, ap);
 
-    size_t payload_size = SYSLOG_MAX_MESSAGE + 128;
-    char* payload = malloc(payload_size);
-    if (payload == NULL) {
-        free(message);
-        return;
-    }
+    syslog_item_t item;
+    log_service_build_syslog_payload(level, tag, message, item.payload, sizeof(item.payload));
 
-    log_service_build_syslog_payload(level, tag, message, payload, payload_size);
-    log_service_send_udp(g_app_config.syslogServer, g_app_config.syslogPort, payload);
-
-    free(payload);
-    free(message);
+    xQueueSend(syslog_queue, &item, 0);
 }
 
 void log_service_init(void) {
     log_service_forwarding_ready = false;
+    if (syslog_queue == NULL) {
+        syslog_queue = xQueueCreate(SYSLOG_QUEUE_SIZE, sizeof(syslog_item_t));
+        xTaskCreate(syslog_worker_task, "syslog_task", 2048, NULL, 3, NULL);
+    }
 }
 
 void log_service_set_ready(bool ready) {
@@ -178,11 +243,18 @@ void log_service_voutput(int level, const char* tag, const char* format, va_list
     va_list ap_copy;
     va_copy(ap_copy, ap);
 
-    // 创建带换行符的新格式字符串
-    char new_format[strlen(format) + 3];
-    snprintf(new_format, sizeof(new_format), "%s\r\n", format);
+    #ifndef ESP_LOG_CONFIG_INIT
+    #define ESP_LOG_CONFIG_INIT(l) l
+    #endif
 
-    esp_log_va(ESP_LOG_CONFIG_INIT(level), tag, new_format, ap);
+    size_t fmt_len = strlen(format);
+    if (fmt_len + 3 < 256) {
+        char new_format[256];
+        snprintf(new_format, sizeof(new_format), "%s\r\n", format);
+        esp_log_va(ESP_LOG_CONFIG_INIT(level), tag, new_format, ap);
+    } else {
+        esp_log_va(ESP_LOG_CONFIG_INIT(level), tag, format, ap);
+    }
 
     if (log_service_should_forward()) {
         log_service_vsyslog(level, tag, format, ap_copy);
@@ -190,3 +262,27 @@ void log_service_voutput(int level, const char* tag, const char* format, va_list
 
     va_end(ap_copy);
 }
+#else
+
+void log_service_init(void) {
+}
+
+void log_service_set_ready(bool ready) {
+    (void)ready;
+}
+
+void log_service_voutput(int level, const char* tag, const char* format, va_list ap) {
+    #ifndef ESP_LOG_CONFIG_INIT
+    #define ESP_LOG_CONFIG_INIT(l) l
+    #endif
+
+    size_t fmt_len = strlen(format);
+    if (fmt_len + 3 < 256) {
+        char new_format[256];
+        snprintf(new_format, sizeof(new_format), "%s\r\n", format);
+        esp_log_va(ESP_LOG_CONFIG_INIT(level), tag, new_format, ap);
+    } else {
+        esp_log_va(ESP_LOG_CONFIG_INIT(level), tag, format, ap);
+    }
+}
+#endif

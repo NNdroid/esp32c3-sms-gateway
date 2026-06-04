@@ -433,13 +433,13 @@
         </div>
       </div>
 
-      <div class="section">
+      <div class="section" id="cronSection">
         <div class="section-title">⏱️ 定時任務 (依賴 NTP 同步)</div>
         <div class="hint" style="margin-bottom:18px;">💡 每日定時測試網路連通性或發送存活報告。</div>
         <div id="cronContainer"></div>
       </div>
 
-      <div class="section">
+      <div class="section" id="syslogSection">
         <div class="section-title">📝 系統日誌 (Syslog) 設定</div>
         <div class="form-group" style="display: flex; align-items: center; flex-wrap: wrap;">
           <label class="switch">
@@ -459,6 +459,18 @@
             <label>端口 (預設 514)</label>
             <input type="number" name="syslogPort" placeholder="514">
           </div>
+        </div>
+      </div>
+
+      <div class="section" id="callNotifySection" style="display:none;">
+        <div class="section-title">📞 來電通知設定</div>
+        <div class="form-group" style="display: flex; align-items: center; flex-wrap: wrap;">
+          <label class="switch">
+            <input type="checkbox" name="callNotifyEnabled" id="callNotifyEnabled" onchange="toggleCallNotify()">
+            <span class="slider"></span>
+          </label>
+          <label for="callNotifyEnabled" class="label-inline">啟用來電通知推送</label>
+          <span id="callNotifyStatusBadge" class="status-badge badge-disabled">已停用</span>
         </div>
       </div>
       
@@ -593,6 +605,41 @@
       document.getElementById('cronContainer').innerHTML = html;
     }
 
+    function setCronSectionVisible(visible) {
+      const section = document.getElementById('cronSection');
+      if (!section) return;
+      section.style.display = visible ? '' : 'none';
+      if (visible) {
+        renderCron();
+        for (let i = 0; i < 3; i++) toggleCron(i);
+      }
+    }
+
+    function setSyslogSectionVisible(visible) {
+      const section = document.getElementById('syslogSection');
+      if (!section) return;
+      section.style.display = visible ? '' : 'none';
+    }
+
+    function setCallNotifySectionVisible(visible) {
+      const section = document.getElementById('callNotifySection');
+      if (!section) return;
+      section.style.display = visible ? '' : 'none';
+    }
+
+    function toggleCallNotify() {
+      var cb = document.getElementById('callNotifyEnabled');
+      var badge = document.getElementById('callNotifyStatusBadge');
+      if (!badge || !cb) return;
+      if (cb.checked) {
+        badge.textContent = "已啟用";
+        badge.className = "status-badge badge-enabled";
+      } else {
+        badge.textContent = "已停用";
+        badge.className = "status-badge badge-disabled";
+      }
+    }
+
     function toggleChannel(idx) {
       var ch = document.getElementById('channel' + idx);
       var cb = document.getElementById('push' + idx + 'en');
@@ -672,7 +719,7 @@
     function updateSysStatus() {
       fetch('/api/sysinfo').then(r=>{ if(checkAuthError(r)) throw new Error('Unauthorized'); return r.json(); }).then(data => {
         if(data.ip) {
-          document.getElementById('status').innerHTML = '🌐 設備 IP: <strong>' + data.ip + '</strong> &nbsp;|&nbsp; 韌體版本: <strong style="color:var(--success);">' + (data.version || '未知') + '</strong>';
+          document.getElementById('status').innerHTML = '🌐 設備 IP: <strong>' + data.ip + '</strong> &nbsp;|&nbsp; 韌體版本: <strong style="color:var(--success);">' + (data.version || '未知') + '</strong><br>📶 網路類型: <strong>' + (data.networkType || '未知') + '</strong> &nbsp;|&nbsp; 信號強度: <strong>' + (data.signalStrength !== undefined ? data.signalStrength + ' dBm' : '未知') + '</strong><br>剩余内存: <strong>' + (data.freeHeap || '未知') + ' bytes</strong> &nbsp;|&nbsp;最小剩余内存: <strong>' + (data.minFreeHeap || '未知') + ' bytes</strong> &nbsp;|&nbsp;CPU 使用率: <strong>' + (data.cpuUsage !== undefined ? data.cpuUsage.toFixed(2) + '%' : '未知') + '</strong>';
         }
         var widget = document.getElementById('simFloatingStatus');
         var dot = document.getElementById('simDot');
@@ -691,8 +738,6 @@
 
     document.addEventListener('DOMContentLoaded', () => {
       renderChannels();
-      renderCron();
-      for (let i = 0; i < 3; i++) toggleCron(i);
       updateSysStatus();
       setInterval(updateSysStatus, 3000);
 
@@ -719,11 +764,30 @@
                 document.getElementById('plmnSelect').append(new Option(customPlmn, customPlmn, true, true));
             }
         });
-        document.querySelector('[name=syslogEnabled]').checked = data.syslogEnabled;
-        toggleSyslog();
-        document.querySelector('[name=syslogServer]').value = data.syslogServer;
-        document.querySelector('[name=syslogPort]').value = data.syslogPort;
+        if (data.logServiceEnabled === false) {
+          setSyslogSectionVisible(false);
+        } else {
+          setSyslogSectionVisible(true);
+          document.querySelector('[name=syslogEnabled]').checked = data.syslogEnabled;
+          toggleSyslog();
+          document.querySelector('[name=syslogServer]').value = data.syslogServer;
+          document.querySelector('[name=syslogPort]').value = data.syslogPort;
+        }
         
+        if (data.callProcessorEnabled === true) {
+          setCallNotifySectionVisible(true);
+          document.querySelector('[name=callNotifyEnabled]').checked = data.callNotifyEnabled;
+          toggleCallNotify();
+        } else {
+          setCallNotifySectionVisible(false);
+        }
+
+        if (data.cronTaskerEnabled === false) {
+          setCronSectionVisible(false);
+        } else {
+          setCronSectionVisible(true);
+        }
+
         data.pushChannels.forEach((ch, i) => {
           document.getElementById('push'+i+'en').checked = ch.enabled;
           document.querySelector(`[name=push${i}name]`).value = ch.name;
@@ -736,7 +800,7 @@
           updateTypeHint(i);
         });
         
-        if (data.cronTasks) {
+        if (data.cronTaskerEnabled !== false && data.cronTasks) {
           data.cronTasks.forEach((tsk, i) => {
             document.getElementById('cron'+i+'en').checked = tsk.enabled;
             document.querySelector(`[name=cron${i}type]`).value = tsk.type;

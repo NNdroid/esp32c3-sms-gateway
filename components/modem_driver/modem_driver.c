@@ -75,6 +75,9 @@ static void dispatch_urc_to_handlers(int event_id, const char* payload) {
     for (int i = 0; i < MAX_URC_HANDLERS; i++) {
         if (urc_handlers[i].handler) {
             urc_handlers[i].handler(event_id, payload, urc_handlers[i].user_ctx);
+        } else {
+            // 因为数组是紧凑的，遇到 NULL 说明后面全空了，直接打断循环
+            break; 
         }
     }
     xSemaphoreGive(urc_handler_mutex);
@@ -219,7 +222,7 @@ static void gnss_urc_handler(int event_id, const char* payload, void* user_ctx) 
             g_current_location.speed = atof(field_buf) * 1.852f;
         }
         // ==========================================
-        // 🌟 利用 GNSS 自动对齐 ESP32 系统时间
+        // 🌟 利用 GNSS 自动对齐系统时间
         // ==========================================
         char time_buf[16] = {0};
         char date_buf[16] = {0};
@@ -232,7 +235,7 @@ static void gnss_urc_handler(int event_id, const char* payload, void* user_ctx) 
             
             struct tm tm_info = {0};
 
-            // 1. 解析时间 (时、分、秒) - 使用 %2d 强制每次只读2个字符，完美避开警告
+            // 解析时间 (时、分、秒) - 使用 %2d 强制每次只读2个字符，完美避开警告
             int h = 0, m = 0, s = 0;
             if (sscanf(time_buf, "%2d%2d%2d", &h, &m, &s) == 3) {
                 tm_info.tm_hour = h;
@@ -240,7 +243,7 @@ static void gnss_urc_handler(int event_id, const char* payload, void* user_ctx) 
                 tm_info.tm_sec = s;
             }
 
-            // 2. 解析日期 (日、月、年)
+            // 解析日期 (日、月、年)
             int day = 0, mon = 0, yr = 0;
             if (sscanf(date_buf, "%2d%2d%2d", &day, &mon, &yr) == 3) {
                 tm_info.tm_mday = day;
@@ -248,14 +251,14 @@ static void gnss_urc_handler(int event_id, const char* payload, void* user_ctx) 
                 tm_info.tm_year = yr + 100;    // 2000年以后加 100
             }
 
-            // 3. 转换为 UNIX 时间戳 (GNSS 上报的永远是绝对的 UTC 时间)
+            // 转换为 UNIX 时间戳 (GNSS 上报的永远是绝对的 UTC 时间)
             time_t utc_time = mktime(&tm_info);
 
-            // 4. 读取 ESP32 当前系统时间做对比
+            // 读取 ESP32 当前系统时间做对比
             struct timeval tv_now;
             gettimeofday(&tv_now, NULL);
             
-            // 💡 优化细节：只在系统时间偏差超过 2 秒时才去强制更新，避免每秒钟都无意义地重写系统时钟
+            // 只在系统时间偏差超过 2 秒时才去强制更新，避免每秒钟都无意义地重写系统时钟
             if (abs((int)(tv_now.tv_sec - utc_time)) > 2) {
                 struct timeval tv = { .tv_sec = utc_time, .tv_usec = 0 };
                 settimeofday(&tv, NULL);
@@ -317,22 +320,31 @@ bool is_modem_data_allowed(void) {
 
 // ================= URC (主动上报) 全局事件广播与分发 =================
 static void process_urc_line(const char* line) {
-    if (strstr(line, "+CMT:") != NULL) {
-        ESP_LOGI(TAG, "💌 收到新短信提示，正在向全局广播...");
-        esp_event_post(MODEM_EVENT, MODEM_EVENT_SMS_RECEIVED, line, strlen(line) + 1, portMAX_DELAY);
+    // 🌟 修复：必须同时支持拦截直通(+CMT) 和 存储拉取(+CMTI)
+    if (strstr(line, "+CMT:") != NULL || strstr(line, "+CMTI:") != NULL) {
+        ESP_LOGI(TAG, "💌 收到新短信通知，正在向全局广播...");
         dispatch_urc_to_handlers(MODEM_EVENT_SMS_RECEIVED, line);
+        if (esp_event_post(MODEM_EVENT, MODEM_EVENT_SMS_RECEIVED, line, strlen(line) + 1, pdMS_TO_TICKS(10)) != ESP_OK) {
+            ESP_LOGW(TAG, "事件队列满，丢弃 URC: MODEM_EVENT_SMS_RECEIVED");
+        }
     } else if (strstr(line, "+CLIP:") != NULL) {
         ESP_LOGI(TAG, "☎️ 收到来电，正在向全局广播...");
-        esp_event_post(MODEM_EVENT, MODEM_EVENT_CALL_RINGING, line, strlen(line) + 1, portMAX_DELAY);
         dispatch_urc_to_handlers(MODEM_EVENT_CALL_RINGING, line);
+        if (esp_event_post(MODEM_EVENT, MODEM_EVENT_CALL_RINGING, line, strlen(line) + 1, pdMS_TO_TICKS(10)) != ESP_OK) {
+            ESP_LOGW(TAG, "事件队列满，丢弃 URC: MODEM_EVENT_CALL_RINGING");
+        }
     } else if (strstr(line, "+MPING:") != NULL) {
         ESP_LOGI(TAG, "🌐 收到异步 Ping 数据，正在向全局广播...");
-        esp_event_post(MODEM_EVENT, MODEM_EVENT_PING_REPORT, line, strlen(line) + 1, portMAX_DELAY);
         dispatch_urc_to_handlers(MODEM_EVENT_PING_REPORT, line);
+        if (esp_event_post(MODEM_EVENT, MODEM_EVENT_PING_REPORT, line, strlen(line) + 1, pdMS_TO_TICKS(10)) != ESP_OK) {
+            ESP_LOGW(TAG, "事件队列满，丢弃 URC: MODEM_EVENT_PING_REPORT");
+        }
     } else if (strstr(line, "+CEREG:") != NULL || strstr(line, "+CREG:") != NULL) {
         ESP_LOGI(TAG, "📡 蜂窝网络状态变化，正在向全局广播...");
-        esp_event_post(MODEM_EVENT, MODEM_EVENT_NET_CHANGED, line, strlen(line) + 1, portMAX_DELAY);
         dispatch_urc_to_handlers(MODEM_EVENT_NET_CHANGED, line);
+        if (esp_event_post(MODEM_EVENT, MODEM_EVENT_NET_CHANGED, line, strlen(line) + 1, pdMS_TO_TICKS(10)) != ESP_OK) {
+            ESP_LOGW(TAG, "事件队列满，丢弃 URC: MODEM_EVENT_NET_CHANGED");
+        }
     } 
     // 统一处理所有 GNSS 相关的上报 (包括带前缀和不带前缀的)
     else if (strstr(line, "+MGNSS:") != NULL || 
@@ -344,10 +356,10 @@ static void process_urc_line(const char* line) {
     }
 }
 
-// ================= 核心：UART 后台解析任务 (优先级最高) =================
+// ================= UART 后台解析任务 (优先级最高) =================
 static void modem_event_task(void *pvParameters) {
     uart_event_t event;
-    uint8_t* dtmp = (uint8_t*) malloc(UART_BUF_SIZE);
+    static uint8_t dtmp[UART_BUF_SIZE];
     
     static char line_buf[1024];
     static int line_pos = 0;
@@ -422,7 +434,6 @@ static void modem_event_task(void *pvParameters) {
             }
         }
     }
-    free(dtmp);
     vTaskDelete(NULL);
 }
 
@@ -458,11 +469,9 @@ esp_err_t modem_send_at_command(const char* cmd, char* out_resp, size_t max_len,
     xSemaphoreGive(at_mutex);
 
     if (bits & AT_FLAG_OK) {
-        // 如果有接收缓冲区就打印内容，没有就直接打印 OK
         ESP_LOGI(TAG, "<- 响应: %s", (out_resp && strlen(out_resp) > 0) ? out_resp : "OK");
         return ESP_OK;
     } else if (bits & AT_FLAG_ERROR) {
-        // 补充 ERROR 的打印，以后再有错误就不会无声无息了
         ESP_LOGE(TAG, "<- 响应: ERROR (指令: %s)", cmd);
         return ESP_FAIL;
     } else {
@@ -471,39 +480,35 @@ esp_err_t modem_send_at_command(const char* cmd, char* out_resp, size_t max_len,
     }
 }
 
-// ================= 核心：后台异步执行 Worker 任务 =================
+// ================= 后台异步执行 Worker 任务 =================
 static void modem_at_worker_task(void *pvParameters) {
-    async_at_req_t *req = NULL;
+    async_at_req_t req;
     char resp_buf[MODEM_AT_COMMAND_MAX_RESPONSE];
 
     while (1) {
-        if (xQueueReceive(at_async_queue, &req, portMAX_DELAY)) {
-            if (req == NULL) continue;
-            ESP_LOGD(TAG, "Worker 处理异步指令: %s", req->cmd);
+        if (xQueueReceive(at_async_queue, &req, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGD(TAG, "Worker 处理异步指令: %s", req.cmd);
             memset(resp_buf, 0, sizeof(resp_buf));
             
-            esp_err_t err = modem_send_at_command(req->cmd, resp_buf, sizeof(resp_buf), req->timeout_ms);
-            if (req->callback) {
-                req->callback(err, resp_buf, req->user_ctx);
+            esp_err_t err = modem_send_at_command(req.cmd, resp_buf, sizeof(resp_buf), req.timeout_ms);
+            if (req.callback) {
+                req.callback(err, resp_buf, req.user_ctx);
             }
-            free(req);
         }
     }
 }
 
 esp_err_t modem_enqueue_at_command_async(const char* cmd, uint32_t timeout_ms, modem_at_cb_t cb, void* user_ctx) {
     if (!cmd || strlen(cmd) >= 128) return ESP_ERR_INVALID_ARG;
-    async_at_req_t *req = malloc(sizeof(async_at_req_t));
-    if (!req) return ESP_ERR_NO_MEM;
+    async_at_req_t req;
 
-    strncpy(req->cmd, cmd, sizeof(req->cmd) - 1);
-    req->cmd[sizeof(req->cmd) - 1] = '\0';
-    req->timeout_ms = timeout_ms;
-    req->callback = cb;
-    req->user_ctx = user_ctx;
+    strncpy(req.cmd, cmd, sizeof(req.cmd) - 1);
+    req.cmd[sizeof(req.cmd) - 1] = '\0';
+    req.timeout_ms = timeout_ms;
+    req.callback = cb;
+    req.user_ctx = user_ctx;
 
     if (xQueueSend(at_async_queue, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
-        free(req);
         return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;
@@ -532,15 +537,27 @@ esp_err_t modem_unregister_urc_handler(modem_urc_handler_t handler, void* user_c
     if (xSemaphoreTake(urc_handler_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
+    
     esp_err_t res = ESP_ERR_NOT_FOUND;
+    int found_idx = -1;
+
     for (int i = 0; i < MAX_URC_HANDLERS; i++) {
         if (urc_handlers[i].handler == handler && urc_handlers[i].user_ctx == user_ctx) {
-            urc_handlers[i].handler = NULL;
-            urc_handlers[i].user_ctx = NULL;
-            res = ESP_OK;
+            found_idx = i;
             break;
         }
     }
+
+    if (found_idx != -1) {
+        for (int i = found_idx; i < MAX_URC_HANDLERS - 1; i++) {
+            urc_handlers[i] = urc_handlers[i + 1]; 
+        }
+        urc_handlers[MAX_URC_HANDLERS - 1].handler = NULL;
+        urc_handlers[MAX_URC_HANDLERS - 1].user_ctx = NULL;
+        
+        res = ESP_OK;
+    }
+
     xSemaphoreGive(urc_handler_mutex);
     return res;
 }
@@ -624,10 +641,6 @@ static void modem_ping_urc_handler(int event_id, const char* payload, void* user
 
 esp_err_t modem_ping(const char* target, int count, int timeout_s, int* out_success_count, int* out_avg_rtt, char* details, size_t details_len) {
     if (!target || strlen(target) == 0 || count <= 0 || timeout_s <= 0) return ESP_ERR_INVALID_ARG;
-    if (!g_allow_modem_data_network) {
-        ESP_LOGW(TAG, "当前 Modem 数据网络连接被全局开关禁止，无法执行 Ping 操作");
-        return ESP_ERR_INVALID_STATE;
-    }
 
     if (out_success_count) *out_success_count = 0;
     if (out_avg_rtt) *out_avg_rtt = 0;
@@ -740,19 +753,113 @@ esp_err_t modem_send_sms_text(const char* phone, const char* content, uint32_t t
     return result;
 }
 
+esp_err_t modem_read_sms_pdu(int index, char* out_pdu, size_t max_len) {
+    if (!out_pdu || max_len == 0) return ESP_ERR_INVALID_ARG;
+
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "AT+CMGR=%d", index);
+
+    char resp_buf[1024] = {0};
+    esp_err_t err = modem_send_at_command(cmd, resp_buf, sizeof(resp_buf), 3000);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    // 解析格式通常为:
+    // +CMGR: 1,,24\r\n
+    // 0891683108100005F0040D916831...\r\n
+    // OK
+    char* header = strstr(resp_buf, "+CMGR:");
+    if (!header) {
+        return ESP_ERR_NOT_FOUND; // 短信槽位为空或已被删除
+    }
+
+    // 跳到下一行寻找 PDU 数据
+    char* pdu_start = strchr(header, '\n');
+    if (!pdu_start) {
+        return ESP_FAIL;
+    }
+    pdu_start++; 
+
+    // 跳过多余的不可见控制字符
+    while (*pdu_start == '\r' || *pdu_start == '\n' || *pdu_start == ' ') {
+        pdu_start++;
+    }
+
+    // PDU 直到遇到下一个换行符为止
+    char* pdu_end = pdu_start;
+    while (*pdu_end != '\0' && *pdu_end != '\r' && *pdu_end != '\n') {
+        pdu_end++;
+    }
+
+    size_t pdu_len = pdu_end - pdu_start;
+    if (pdu_len == 0 || pdu_len >= max_len) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    strncpy(out_pdu, pdu_start, pdu_len);
+    out_pdu[pdu_len] = '\0';
+
+    return ESP_OK;
+}
+
+esp_err_t modem_delete_sms(int index) {
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "AT+CMGD=%d", index);
+    return modem_send_at_command(cmd, NULL, 0, 2000);
+}
+
+esp_err_t modem_get_all_sms_indices(int* out_indices, int max_count, int* out_count) {
+    if (!out_indices || !out_count || max_count <= 0) return ESP_ERR_INVALID_ARG;
+    *out_count = 0;
+
+    // 由于 AT+CMGL=4 可能会返回多条短信 PDU，使用固定静态缓冲区避免运行时分配
+    static char resp_buf[4096];
+    memset(resp_buf, 0, sizeof(resp_buf));
+
+    // AT+CMGL=4 代表列出所有 (已读、未读、未发送等)
+    esp_err_t err = modem_send_at_command("AT+CMGL=4", resp_buf, sizeof(resp_buf), 5000);
+    if (err == ESP_OK) {
+        char* p = resp_buf;
+        // 寻找所有 "+CMGL:" 开头的行
+        while ((p = strstr(p, "+CMGL:")) != NULL && *out_count < max_count) {
+            p += 6; // 跳过 "+CMGL:" 字符
+            while (*p == ' ') p++; // 跳过可能存在的空格
+            
+            int idx = atoi(p); // 提取逗号前的索引数字
+            if (idx >= 0) {
+                out_indices[*out_count] = idx;
+                (*out_count)++;
+            }
+        }
+    }
+    return err;
+}
+
 // ================= 驱动初始化 =================
 esp_err_t modem_driver_init(void) {
     at_mutex = xSemaphoreCreateMutex();
     at_event_group = xEventGroupCreate();
     urc_handler_mutex = xSemaphoreCreateMutex();
-    at_async_queue = xQueueCreate(8, sizeof(async_at_req_t*));
-    if (!at_mutex || !at_event_group || !urc_handler_mutex || !at_async_queue) return ESP_FAIL;
+    at_async_queue = xQueueCreate(8, sizeof(async_at_req_t));
+    if (!at_mutex || !at_event_group || !urc_handler_mutex || !at_async_queue) {
+        ESP_LOGE(TAG, "初始化 Modem 同步资源失败");
+        if (at_mutex) vSemaphoreDelete(at_mutex);
+        if (at_event_group) vEventGroupDelete(at_event_group);
+        if (urc_handler_mutex) vSemaphoreDelete(urc_handler_mutex);
+        if (at_async_queue) vQueueDelete(at_async_queue);
+        return ESP_FAIL;
+    }
 
     modem_register_urc_handler(cellular_status_urc_handler, NULL);
 
     esp_err_t err = esp_event_loop_create_default();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "创建默认事件循环失败: %s", esp_err_to_name(err));
+        vSemaphoreDelete(at_mutex);
+        vEventGroupDelete(at_event_group);
+        vSemaphoreDelete(urc_handler_mutex);
+        vQueueDelete(at_async_queue);
         return err;
     }
 
@@ -781,8 +888,8 @@ esp_err_t modem_driver_init(void) {
     ESP_LOGI(TAG, "正在与模组握手并查询型号...");
     
     bool modem_ready = false;
-    for (int i = 0; i < 10; i++) {
-        if (modem_send_at_command("AT", NULL, 0, 1000) == ESP_OK) {
+    for (int i = 0; i < 100; i++) {
+        if (modem_send_at_command("AT", NULL, 0, 3000) == ESP_OK) {
             modem_ready = true;
             break;
         }

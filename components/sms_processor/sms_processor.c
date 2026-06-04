@@ -11,23 +11,33 @@
 #include "esp_event.h"
 #include <string.h>
 #include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 static const char *TAG = "SMS_PROC";
 
 // ================= Core definitions =================
-#define PDU_QUEUE_SIZE 10
+#define EVENT_QUEUE_SIZE 20
 #define MAX_PDU_HEX_LEN 512
 
 #define MAX_CONCAT_PARTS 10
 #define MAX_CONCAT_MESSAGES 5
 #define CONCAT_TIMEOUT_MS 30000
 
+// 双模兼容事件结构体
+typedef struct {
+    bool is_stored;                // true: 存储模式 (只有 index), false: 直通模式 (包含完整 PDU)
+    int sms_index;                 // SIM卡/模块槽位索引
+    char pdu_hex[MAX_PDU_HEX_LEN]; // 完整的 PDU 字符串
+} sms_event_t;
+
 // Queue handle
-static QueueHandle_t pdu_queue;
+static QueueHandle_t sms_event_queue;
 
 // Single SMS part structure
 typedef struct {
     bool valid;
+    int sms_index;
     char text[160 * 3]; // Maximum possible UTF-8 text length
 } sms_part_t;
 
@@ -97,23 +107,6 @@ bool sms_processor_is_blacklisted(const char* sender) {
     return false;
 }
 
-static void sms_processor_push(const char* sender, const char* text, const char* timestamp) {
-    ESP_LOGI(TAG, "🚀 准备分发完整短信...");
-    ESP_LOGI(TAG, "发件人: %s", sender);
-    
-    if (sms_processor_is_blacklisted(sender)) {
-        ESP_LOGW(TAG, "发件人 %s 命中黑名单，丢弃该短信推送", sender);
-        return;
-    }
-
-    if (sms_processor_is_admin_phone(sender)) {
-        ESP_LOGI(TAG, "发件人 %s 为管理员手机号，将保留推送处理", sender);
-    }
-
-    // 触发 HTTP Webhook 推送
-    push_service_send(sender, text, timestamp);
-}
-
 // ================= 长短信拼接逻辑 =================
 
 static void init_concat_buffer(void) {
@@ -141,14 +134,12 @@ static int find_or_create_concat_slot(int ref, const char* sdr, int tot) {
             for(int j=0; j<MAX_CONCAT_PARTS; j++) concat_buffer[i].parts[j].valid = false;
             return i;
         }
-        // 记录最老的槽位，以便在缓冲满时淘汰
         if (concat_buffer[i].firstPartTime < oldest_time) {
             oldest_time = concat_buffer[i].firstPartTime;
             oldest_slot = i;
         }
     }
     
-    // 强制淘汰最老的槽位 (极少发生)
     ESP_LOGW(TAG, "拼接缓冲已满，淘汰旧数据 (Ref: %d)", concat_buffer[oldest_slot].refNumber);
     concat_buffer[oldest_slot].inUse = true;
     concat_buffer[oldest_slot].refNumber = ref;
@@ -164,90 +155,124 @@ static int find_or_create_concat_slot(int ref, const char* sdr, int tot) {
 // ================= 后台处理任务 =================
 
 static void sms_processor_task(void *pvParameters) {
-    char pdu_hex[MAX_PDU_HEX_LEN];
+    sms_event_t evt;
+    char pdu_hex_buf[MAX_PDU_HEX_LEN]; 
     decoded_sms_t decoded_sms;
 
     init_concat_buffer();
-    ESP_LOGI(TAG, "短信处理与分发引擎已启动");
+    ESP_LOGI(TAG, "✅ 短信处理与分发引擎已启动 (双模兼容: 存储拉取 + 直通)");
 
     for(;;) {
-        // Wait for PDU queue data (timeout 2 seconds)
-        if (xQueueReceive(pdu_queue, pdu_hex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+        // 从队列获取事件 (超时 2 秒以便处理长短信合并超时)
+        if (xQueueReceive(sms_event_queue, &evt, pdMS_TO_TICKS(2000)) == pdTRUE) {
             
-            // 1. 解码 PDU
-            if (pdu_decode(pdu_hex, &decoded_sms) == ESP_OK) {
+            bool pdu_ready = false;
+
+            // ---------------- 核心兼容逻辑 ----------------
+            if (evt.is_stored) {
+                ESP_LOGI(TAG, "🔍 正在向模块读取槽位 %d 的短信内容...", evt.sms_index);
                 
-                // 2. 判断是否是长短信分片
-                if (decoded_sms.is_concat && decoded_sms.total_parts > 1 && decoded_sms.part_number > 0) {
-                    ESP_LOGI(TAG, "收到长短信分片: 序号 %d/%d, 标识 %d", 
-                             decoded_sms.part_number, decoded_sms.total_parts, decoded_sms.ref_number);
-                             
-                    int slot = find_or_create_concat_slot(decoded_sms.ref_number, decoded_sms.sender, decoded_sms.total_parts);
-                    int pIdx = decoded_sms.part_number - 1;
-                    
-                    if (pIdx >= 0 && pIdx < MAX_CONCAT_PARTS && !concat_buffer[slot].parts[pIdx].valid) {
-                        concat_buffer[slot].parts[pIdx].valid = true;
-                        strlcpy(concat_buffer[slot].parts[pIdx].text, decoded_sms.text, sizeof(concat_buffer[slot].parts[pIdx].text));
-                        concat_buffer[slot].receivedParts++;
-                        
-                        if (concat_buffer[slot].receivedParts == 1) {
-                            strlcpy(concat_buffer[slot].timestamp, decoded_sms.timestamp, sizeof(concat_buffer[slot].timestamp));
-                        }
-                    }
-                    
-                    // 3. 检查是否拼接完成
-                    if (concat_buffer[slot].receivedParts >= decoded_sms.total_parts) {
-                        ESP_LOGI(TAG, "✅ 长短信拼接完成");
-                        
-                        // 🚀 修复点 1：使用堆内存代替栈内存
-                        char *full_text = calloc(1, 160 * 3 * MAX_CONCAT_PARTS);
-                        if (full_text) {
-                            for (int i = 0; i < decoded_sms.total_parts; i++) {
-                                if (concat_buffer[slot].parts[i].valid) {
-                                    strcat(full_text, concat_buffer[slot].parts[i].text);
-                                } else {
-                                    strcat(full_text, "[缺分段]");
-                                }
-                            }
-                            sms_processor_push(concat_buffer[slot].sender, full_text, concat_buffer[slot].timestamp);
-                            free(full_text); // 🚀 用完立刻释放
-                        } else {
-                            ESP_LOGE(TAG, "内存不足，无法拼接长短信");
-                        }
-                        concat_buffer[slot].inUse = false; // 清空槽位
-                    }
+                if (modem_read_sms_pdu(evt.sms_index, pdu_hex_buf, sizeof(pdu_hex_buf)) == ESP_OK) {
+                    pdu_ready = true;
                 } else {
-                    // Regular single SMS
-                    ESP_LOGI(TAG, "收到普通短信");
-                    sms_processor_push(decoded_sms.sender, decoded_sms.text, decoded_sms.timestamp);
+                    ESP_LOGE(TAG, "❌ 读取槽位 %d 失败，放弃该短信", evt.sms_index);
                 }
             } else {
-                ESP_LOGE(TAG, "PDU 字符串解码失败");
+                strlcpy(pdu_hex_buf, evt.pdu_hex, sizeof(pdu_hex_buf));
+                pdu_ready = true;
+            }
+            // ----------------------------------------------
+
+            // 统一进入解码与拼接流程
+            if (pdu_ready) {
+                if (pdu_decode(pdu_hex_buf, &decoded_sms) == ESP_OK) {
+                    
+                    // 黑名单过滤提前拦截
+                    if (sms_processor_is_blacklisted(decoded_sms.sender)) {
+                        ESP_LOGW(TAG, "拦截: 发件人 %s 命中黑名单，丢弃并自动清理该短信", decoded_sms.sender);
+                        if (evt.is_stored) {
+                            modem_delete_sms(evt.sms_index); // 黑名单垃圾短信直接底层清理
+                        }
+                        continue; 
+                    }
+
+                    if (decoded_sms.is_concat && decoded_sms.total_parts > 1 && decoded_sms.part_number > 0) {
+                        ESP_LOGI(TAG, "🧩 收到长短信分片: 序号 %d/%d, 标识 %d", 
+                                 decoded_sms.part_number, decoded_sms.total_parts, decoded_sms.ref_number);
+                                 
+                        int slot = find_or_create_concat_slot(decoded_sms.ref_number, decoded_sms.sender, decoded_sms.total_parts);
+                        int pIdx = decoded_sms.part_number - 1;
+                        
+                        if (pIdx >= 0 && pIdx < MAX_CONCAT_PARTS && !concat_buffer[slot].parts[pIdx].valid) {
+                            concat_buffer[slot].parts[pIdx].valid = true;
+                            strlcpy(concat_buffer[slot].parts[pIdx].text, decoded_sms.text, sizeof(concat_buffer[slot].parts[pIdx].text));
+                            concat_buffer[slot].parts[pIdx].sms_index = evt.sms_index;
+                            concat_buffer[slot].receivedParts++;
+                            
+                            if (concat_buffer[slot].receivedParts == 1) {
+                                strlcpy(concat_buffer[slot].timestamp, decoded_sms.timestamp, sizeof(concat_buffer[slot].timestamp));
+                            }
+                        }
+                        
+                        if (concat_buffer[slot].receivedParts >= decoded_sms.total_parts) {
+                            ESP_LOGI(TAG, "✅ 长短信拼接完成，准备推送");
+                            static char full_text[160 * 3 * MAX_CONCAT_PARTS];
+                            full_text[0] = '\0';
+                            int indexes_to_delete[MAX_CONCAT_PARTS];
+                            int del_count = 0;
+                            
+                            for (int i = 0; i < decoded_sms.total_parts; i++) {
+                                if (concat_buffer[slot].parts[i].valid) {
+                                    strlcat(full_text, concat_buffer[slot].parts[i].text, sizeof(full_text));
+                                    if (evt.is_stored) {
+                                        indexes_to_delete[del_count++] = concat_buffer[slot].parts[i].sms_index;
+                                    }
+                                }
+                            }
+                            
+                            push_service_send_with_ack(concat_buffer[slot].sender, full_text, concat_buffer[slot].timestamp, 
+                                                       evt.is_stored ? indexes_to_delete : NULL, del_count);
+                            concat_buffer[slot].inUse = false; 
+                        }
+                    } else {
+                        // Regular single SMS
+                        ESP_LOGI(TAG, "💬 收到普通完整短信，发件人: %s，开始推送", decoded_sms.sender);
+                        int single_index[1] = { evt.sms_index };
+                        push_service_send_with_ack(decoded_sms.sender, decoded_sms.text, decoded_sms.timestamp, 
+                                                   evt.is_stored ? single_index : NULL, evt.is_stored ? 1 : 0);
+                    }
+                } else {
+                    ESP_LOGE(TAG, "❌ PDU 字符串解码失败:\n%s", pdu_hex_buf);
+                    // 如果乱码或者无法解码，可以直接删掉防止堵塞内存
+                    if (evt.is_stored) { modem_delete_sms(evt.sms_index); }
+                }
             }
         }
         
-        // 4. 检查超时未完成的长短信槽位
+        // 超时未完成的长短信检查
         TickType_t now = xTaskGetTickCount();
         for (int i = 0; i < MAX_CONCAT_MESSAGES; i++) {
             if (concat_buffer[i].inUse) {
                 uint32_t elapsed_ms = (now - concat_buffer[i].firstPartTime) * portTICK_PERIOD_MS;
                 if (elapsed_ms >= CONCAT_TIMEOUT_MS) {
-                    ESP_LOGW(TAG, "⚠️ 长短信等待分片超时 (已过 %d 毫秒)，强制转发已收到的部分", CONCAT_TIMEOUT_MS);
+                    ESP_LOGW(TAG, "⚠️ 长短信等待分片超时，强制转发已收到的部分");
                     
-                    // 🚀 修复点 2：使用堆内存代替栈内存
-                    char *full_text = calloc(1, 160 * 3 * MAX_CONCAT_PARTS);
-                    if (full_text) {
-                        for (int j = 0; j < concat_buffer[i].totalParts; j++) {
-                            if (concat_buffer[i].parts[j].valid) {
-                                strcat(full_text, concat_buffer[i].parts[j].text);
-                            } else {
-                                strcat(full_text, "\n[缺失的短信分段]\n");
-                            }
+                    static char full_text[160 * 3 * MAX_CONCAT_PARTS];
+                    full_text[0] = '\0';
+                    int indexes_to_delete[MAX_CONCAT_PARTS];
+                    int del_count = 0;
+
+                    for (int j = 0; j < concat_buffer[i].totalParts; j++) {
+                        if (concat_buffer[i].parts[j].valid) {
+                            strlcat(full_text, concat_buffer[i].parts[j].text, sizeof(full_text));
+                            indexes_to_delete[del_count++] = concat_buffer[i].parts[j].sms_index;
+                        } else {
+                            strlcat(full_text, "\n[缺失的短信分段]\n", sizeof(full_text));
                         }
-                        sms_processor_push(concat_buffer[i].sender, full_text, concat_buffer[i].timestamp);
-                        free(full_text); // 🚀 用完立刻释放
                     }
-                    concat_buffer[i].inUse = false; // 清空槽位
+                    push_service_send_with_ack(concat_buffer[i].sender, full_text, concat_buffer[i].timestamp, 
+                                               (del_count > 0) ? indexes_to_delete : NULL, del_count);
+                    concat_buffer[i].inUse = false;
                 }
             }
         }
@@ -258,63 +283,114 @@ static void sms_processor_task(void *pvParameters) {
 
 esp_err_t sms_processor_enqueue_pdu(const char* pdu_hex_str) {
     if (strlen(pdu_hex_str) >= MAX_PDU_HEX_LEN) return ESP_ERR_INVALID_SIZE;
-    if (xQueueSend(pdu_queue, pdu_hex_str, 0) == pdTRUE) {
+    
+    sms_event_t evt;
+    memset(&evt, 0, sizeof(evt));
+    evt.is_stored = false;
+    strlcpy(evt.pdu_hex, pdu_hex_str, sizeof(evt.pdu_hex));
+
+    if (xQueueSend(sms_event_queue, &evt, 0) == pdTRUE) {
         return ESP_OK;
     }
-    ESP_LOGE(TAG, "PDU 队列已满，丢弃数据！");
+    ESP_LOGE(TAG, "事件队列已满，丢弃数据！");
     return ESP_FAIL;
 }
 
+// ================= URC 回调：智能双模识别 =================
 static void modem_sms_urc_handler(void* handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    if (event_base != MODEM_EVENT || event_id != MODEM_EVENT_SMS_RECEIVED) {
-        return;
-    }
-    if (!event_data) {
+    if (event_base != MODEM_EVENT || event_id != MODEM_EVENT_SMS_RECEIVED || !event_data) {
         return;
     }
 
-    // 从 event_data 中提取 PDU（前提是你的 modem_driver 确实将 +CMT: 行和 PDU 行拼在了一起发过来）
     const char* payload = (const char*) event_data;
+    sms_event_t evt;
+    memset(&evt, 0, sizeof(evt));
+
+    ESP_LOGI(TAG, "开始解析 URC...");
+    if (strstr(payload, "+CMTI:") != NULL) {
+        const char *comma = strchr(payload, ',');
+        if (comma != NULL) {
+            evt.sms_index = atoi(comma + 1); // 提取逗号后面的数字
+            evt.is_stored = true;
+            
+            ESP_LOGI(TAG, "📩 [存储模式] 成功解析到新短信位于槽位: %d", evt.sms_index);
+            ESP_LOGI(TAG, "解析 CMTI 完成，准备压入队列");
+            if (xQueueSend(sms_event_queue, &evt, 0) != pdTRUE) {
+                ESP_LOGE(TAG, "❌ 事件队列已满，丢失通知！(索引: %d)", evt.sms_index);
+                return;
+            }
+            ESP_LOGI(TAG, "压入队列成功！");
+        } else {
+            ESP_LOGW(TAG, "⚠️ 收到 +CMTI 提示，但无法找到逗号解析索引: %s", payload);
+        }
+        return; // 处理完毕，直接退出
+    }
+
+    // 模式 B：检测是否为直通模式 (+CMT: ...)
     const char* pdu_line = strchr(payload, '\n');
-    if (!pdu_line) {
-        ESP_LOGW(TAG, "SMS URC 数据不完整，未找到换行符，无法提取 PDU");
-        return;
-    }
-    pdu_line++; // 跳过换行符，指向 PDU 开头
+    if (pdu_line && strstr(payload, "+CMT:") != NULL) {
+        pdu_line++; // 跳过换行符
 
-    size_t len = strlen(pdu_line);
-    // 安全剔除末尾可能存在的 \r 或 \n
-    while (len > 0 && (pdu_line[len - 1] == '\r' || pdu_line[len - 1] == '\n')) {
-        len--; 
-    }
+        size_t len = strlen(pdu_line);
+        while (len > 0 && (pdu_line[len - 1] == '\r' || pdu_line[len - 1] == '\n')) {
+            len--; 
+        }
 
-    if (len == 0) {
-        ESP_LOGW(TAG, "SMS URC 中未包含 PDU 内容");
-        return;
+        if (len > 0 && len < MAX_PDU_HEX_LEN) {
+            evt.is_stored = false;
+            memcpy(evt.pdu_hex, pdu_line, len);
+            evt.pdu_hex[len] = '\0';
+            
+            ESP_LOGI(TAG, "📩 [直通模式] 提取 PDU，长度: %d", (int)len);
+            
+            if (xQueueSend(sms_event_queue, &evt, 0) != pdTRUE) {
+                ESP_LOGE(TAG, "❌ 事件队列已满，丢失直通 PDU！");
+            }
+        } else {
+            ESP_LOGW(TAG, "直通 PDU 提取失败：长度异常 (%d)", (int)len);
+        }
     }
+}
 
-    char pdu[MAX_PDU_HEX_LEN] = {0};
-    if (len >= sizeof(pdu)) {
-        len = sizeof(pdu) - 1;
+void sms_processor_retry_failed_pushes(void) {
+    ESP_LOGI(TAG, "🧹 开始扫描并尝试重推未删除的遗留短信...");
+    
+    int indices[50]; // 每次最多捞 50 条防止内存挤兑
+    int count = 0;
+    
+    if (modem_get_all_sms_indices(indices, 50, &count) == ESP_OK) {
+        if (count == 0) {
+            ESP_LOGI(TAG, "🎉 当前无遗留短信，系统非常干净");
+            return;
+        }
+        
+        ESP_LOGI(TAG, "📦 共找到 %d 条遗留短信，准备放入队列重试...", count);
+        for (int i = 0; i < count; i++) {
+            sms_event_t evt;
+            memset(&evt, 0, sizeof(evt));
+            evt.is_stored = true;
+            evt.sms_index = indices[i];
+            
+            // 压入队列 (稍微给点延时防止队列被瞬间塞满)
+            if (xQueueSend(sms_event_queue, &evt, pdMS_TO_TICKS(100)) != pdTRUE) {
+                ESP_LOGW(TAG, "⚠️ 事件队列已满，遗留短信(槽位 %d)将留待下次轮询", indices[i]);
+            }
+        }
+    } else {
+        ESP_LOGE(TAG, "❌ 获取遗留短信列表失败");
     }
-    memcpy(pdu, pdu_line, len);
-    pdu[len] = '\0';
-
-    ESP_LOGI(TAG, "成功提取 PDU，长度: %d", (int)len);
-    sms_processor_enqueue_pdu(pdu);
 }
 
 void sms_processor_init(void) {
-    // 创建队列
-    pdu_queue = xQueueCreate(PDU_QUEUE_SIZE, MAX_PDU_HEX_LEN);
-    if (!pdu_queue) {
-        ESP_LOGE(TAG, "创建 PDU 队列失败");
+    // 创建双模事件队列
+    sms_event_queue = xQueueCreate(EVENT_QUEUE_SIZE, sizeof(sms_event_t));
+    if (!sms_event_queue) {
+        ESP_LOGE(TAG, "创建事件队列失败");
         return;
     }
 
-    // 注册 SMS URC 事件监听
     esp_event_handler_instance_register(MODEM_EVENT, MODEM_EVENT_SMS_RECEIVED, &modem_sms_urc_handler, NULL, NULL);
     
-    // 启动后台任务，分配 8KB 堆栈
-    xTaskCreate(sms_processor_task, "sms_proc_task", 10240, NULL, 4, NULL);
+    // 启动处理 Task
+    xTaskCreate(sms_processor_task, "sms_proc_task", 5000, NULL, 4, NULL);
 }

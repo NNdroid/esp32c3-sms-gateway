@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -19,7 +20,9 @@
 #include "push_service.h"
 #include "cron_tasker.h"
 #include "sms_processor.h"
+#ifdef CONFIG_ENABLE_CALL_PROCESSOR
 #include "call_processor.h"
+#endif
 #include "web_server.h"
 
 static const char *TAG = "APP_MAIN";
@@ -35,11 +38,15 @@ static const char *TAG = "APP_MAIN";
 
 static int s_retry_num = 0;
 static bool s_provisioning_started = false;
+EventGroupHandle_t s_net_event_group;
 
 // 前置声明
 static void start_ble_provisioning(void);
 
 void time_sync_notification_cb(struct timeval *tv) {
+    sntp_sync_status_t status = esp_sntp_get_sync_status();
+    ESP_LOGI(TAG, "⏰ SNTP 同步状态: %d", status);
+
     time_t now = 0;
     struct tm timeinfo = { 0 };
     time(&now);
@@ -50,23 +57,53 @@ void time_sync_notification_cb(struct timeval *tv) {
     ESP_LOGI(TAG, "⏰ 收到底层 NTP 同步完成事件: %s", strftime_buf);
 }
 
-static void ntp_time_init(void) {
-    ESP_LOGI(TAG, "初始化 SNTP 服务 (异步模式)...");
-    
-    sntp_set_time_sync_notification_cb(time_sync_notification_cb);
-    
-    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_servermode_dhcp(1);
+static void ntp_time_init(void)
+{
+    static bool s_sntp_inited = false;
+    if (s_sntp_inited) {
+        return;
+    }
 
-    esp_sntp_setservername(0, "ntp.ntsc.ac.cn"); 
-    esp_sntp_setservername(1, "time.apple.com"); 
-    esp_sntp_setservername(2, "cn.pool.ntp.org");
-    esp_sntp_init();
-    
+    ESP_LOGI(TAG, "初始化 SNTP 服务...");
+
     setenv("TZ", "CST-8", 1);
     tzset();
-    
-    ESP_LOGI(TAG, "SNTP 初始化完成，已转入后台自动同步");
+
+    sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
+
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+
+    esp_sntp_setservername(0, "time.apple.com");
+    esp_sntp_servermode_dhcp(1);
+
+    sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+
+    esp_sntp_init();
+
+    s_sntp_inited = true;
+
+    ESP_LOGI(TAG, "等待 SNTP 同步...");
+
+    int retry = 0;
+
+    while (esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && retry < 20) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        retry++;
+    }
+
+    time_t now;
+    struct tm timeinfo;
+
+    time(&now);
+    localtime_r(&now, &timeinfo);
+
+    ESP_LOGI(TAG, "当前时间: %04d-%02d-%02d %02d:%02d:%02d",
+             timeinfo.tm_year + 1900,
+             timeinfo.tm_mon + 1,
+             timeinfo.tm_mday,
+             timeinfo.tm_hour,
+             timeinfo.tm_min,
+             timeinfo.tm_sec);
 }
 
 // 配网事件回调函数
@@ -108,7 +145,9 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
             esp_wifi_connect();
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+#if CONFIG_ENABLE_LOG_SERVICE
         log_service_set_ready(false);
+#endif
         
         // 如果配网服务正在运行，由 network_prov_mgr 内部接管重连尝试，不手动调用 esp_wifi_connect
         if (s_provisioning_started) {
@@ -126,9 +165,36 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "✅ 成功获取局域网 IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        xEventGroupSetBits(s_net_event_group, NET_READY_BIT);
         s_retry_num = 0; // 重置重试计数器
+#if CONFIG_ENABLE_LOG_SERVICE
         log_service_set_ready(true);
-        ntp_time_init();
+#endif
+
+        static bool s_web_started = false;
+        if (!s_web_started) {
+            web_server_start();
+            s_web_started = true;
+        }
+
+        static bool s_ntp_started = false;
+        if (!s_ntp_started) {
+            ntp_time_init();
+            s_ntp_started = true;
+        }
+
+        static bool s_boot_push_sent = false;
+        if (!s_boot_push_sent) {
+            s_boot_push_sent = true;
+            char push_msg[256];
+            snprintf(push_msg, sizeof(push_msg), 
+                     "✅ SMS网关已成功启动！\n"
+                     "🌐 局域网管理地址: http://" IPSTR "\n"
+                     "⏰ 系统时间已转入后台同步。", 
+                     IP2STR(&event->ip_info.ip));
+            
+            push_service_send_now("🚀 设备启动通知", push_msg); 
+        }
     }
 }
 
@@ -202,13 +268,22 @@ static void start_ble_provisioning(void) {
 }
 
 static void wifi_init_sta(void) {
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_err_t netif_err = esp_netif_init();
+    if (netif_err != ESP_OK && netif_err != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(netif_err);
+    }
+
+    // 宽容模式创建事件循环 (如果已经被 Modem 创建了，就不报错)
+    esp_err_t event_err = esp_event_loop_create_default();
+    if (event_err != ESP_OK && event_err != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(event_err);
+    }
+
     esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
+    
     // 注册常规网络事件
     esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL);
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL);
@@ -217,24 +292,24 @@ static void wifi_init_sta(void) {
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     
-    // ================= 🌟 核心修复：安全叠加 WPA3 配置 =================
+    // 叠加 WPA3 配置
     wifi_config_t wifi_config;
-    // 1. 先获取 ESP 底层 NVS 中保存的配置（保留原有的 SSID 和 Password）
+    // 先获取 ESP 底层 NVS 中保存的配置（保留原有的 SSID 和 Password）
     esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
     
-    // 2. 在原有配置基础上，叠加 WPA3 与 PMF 的安全策略
+    // 在原有配置基础上，叠加 WPA3 与 PMF 的安全策略
     wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_WPA3_PSK;
     wifi_config.sta.pmf_cfg.capable = true;
     wifi_config.sta.pmf_cfg.required = false;
     wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
     
-    // 3. 将安全配置写回底层
+    // 将安全配置写回底层
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    // ====================================================================
+
 
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
-    // 1. 初始化配网管理器，仅仅是为了检查是否已有凭据
+    // 初始化配网管理器，仅仅是为了检查是否已有凭据
     bool provisioned = false;
     network_prov_mgr_config_t config = {
         .scheme = network_prov_scheme_ble,
@@ -268,14 +343,33 @@ static void modem_net_event_handler(void* arg, esp_event_base_t event_base, int3
         
         ESP_LOGI("APP_MAIN", "收到蜂窝网络状态改变事件！原始数据: %s, 当前状态枚举: %d", payload, current_status);
         
-        // 状态 1 (本地网络) 和 5 (漫游网络) 都代表已经成功附着蜂窝网络
-        if (current_status == MODEM_NET_STATUS_REGISTERED_HOME || current_status == MODEM_NET_STATUS_REGISTERED_ROAMING) {
+        // ================= 状态跟踪逻辑 =================
+        static bool s_last_attached = false; // 记录上一次是否已附着
+        bool is_attached = (current_status == MODEM_NET_STATUS_REGISTERED_HOME || 
+                            current_status == MODEM_NET_STATUS_REGISTERED_ROAMING);
+        // ===============================================
+
+        // 控制 LED
+        if (is_attached) {
             ESP_LOGI(TAG, "🟢 蜂窝网络已附着，熄灭 LED");
             gpio_set_level(LED_BUILTIN, LED_OFF);
         } else {
             ESP_LOGW(TAG, "🔴 蜂窝网络未附着或掉线，点亮 LED");
             gpio_set_level(LED_BUILTIN, LED_ON);
         }
+
+        // ================= 状态变更推送 =================
+        // 只有当附着状态真正发生改变时（从未附着->已附着，或 已附着->未附着），才触发推送
+        if (is_attached != s_last_attached) {
+            s_last_attached = is_attached;
+            
+            if (is_attached) {
+                push_service_send_now("📶 蜂窝网络已连接", "设备已成功附着到基站网络，短信/通话服务就绪。");
+            } else {
+                push_service_send_now("⚠️ 蜂窝网络已断开", "设备与基站断开连接或正在搜索网络，请注意检查信号状态！");
+            }
+        }
+        // ===============================================
     }
 }
 
@@ -283,9 +377,10 @@ void app_main(void) {
     ESP_LOGI(TAG, "=================================");
     ESP_LOGI(TAG, "📱 SMS网关启动中");
     ESP_LOGI(TAG, "=================================");
+    s_net_event_group = xEventGroupCreate();
 
     // ==========================================
-    // 初始化 LED GPIO
+    // 基础硬件与配置初始化
     // ==========================================
     gpio_reset_pin(LED_BUILTIN);
     // 设置为输出模式
@@ -296,21 +391,28 @@ void app_main(void) {
     // 初始化持久化配置 (NVS)
     config_manager_init(); // 注意：必须确保内部调用了 nvs_flash_init()
     config_load_all();
+#if CONFIG_ENABLE_LOG_SERVICE
     log_service_init();
+#endif
 
-    // 初始化网络栈与配网逻辑
-    wifi_init_sta();
-
-    // 初始化推送服务组件
+    // ==========================================
+    // 核心组件与底层硬件初始化
+    // ==========================================
+    // 启动底层 Modem 驱动 (UART 中断) 必须先这个，创建全局事件bus
+    if (modem_driver_init() != ESP_OK) {
+        ESP_LOGE(TAG, "🚨 Modem 驱动初始化失败，无法继续运行");
+        while (1) {
+            vTaskDelay(pdMS_TO_TICKS(10000));
+        }
+    }
+    // 初始化推送服务组件 (先建好队列，等网络通了才能发)
     push_service_init();
-
     // 启动短信处理引擎 (PDU 队列监听)
     sms_processor_init();
+#if defined(CONFIG_ENABLE_CALL_PROCESSOR) && CONFIG_ENABLE_CALL_PROCESSOR
     // 启动来电处理组件
     call_processor_init();
-
-    // 启动底层 Modem 驱动 (UART 中断)
-    modem_driver_init();
+#endif
 
     esp_event_handler_instance_register(
         MODEM_EVENT, 
@@ -320,6 +422,9 @@ void app_main(void) {
         NULL
     );
     
+    // ==========================================
+    // 配置 4G 模组参数
+    // ==========================================
     char resp[128];
     int retry = 0;
     ESP_LOGI(TAG, "正在與 4G 模組同步波特率，請稍候...");
@@ -338,9 +443,10 @@ void app_main(void) {
         ESP_LOGI(TAG, "✅ 波特率同步成功！模組已就緒。");
         
         modem_send_at_command("ATE0", resp, sizeof(resp), 2000);
-        modem_send_at_command("AT+CMGF=0", resp, sizeof(resp), 2000); 
-        modem_send_at_command("AT+CNMI=2,2,0,0,0", resp, sizeof(resp), 2000); 
-        modem_send_at_command("AT+CLIP=1", resp, sizeof(resp), 2000); 
+        modem_send_at_command("AT+CMGF=0", resp, sizeof(resp), 2000);
+        //modem_send_at_command("AT+CNMI=2,2,0,0,0", resp, sizeof(resp), 2000);//直通模式
+        modem_send_at_command("AT+CNMI=2,1,0,0,0", resp, sizeof(resp), 2000);//存储模式
+        modem_send_at_command("AT+CLIP=1", resp, sizeof(resp), 2000);
 
         if (strlen(g_app_config.plmn) == 0 || strcmp(g_app_config.plmn, "AUTO") == 0) {
             ESP_LOGI(TAG, "PLMN 未配置或 AUTO，使用自動註冊模式");
@@ -359,7 +465,7 @@ void app_main(void) {
         } else {
             ESP_LOGI(TAG, "設定 SMSC: %s", g_app_config.smsc);
             if (modem_set_smsc(g_app_config.smsc) != ESP_OK) {
-                ESP_LOGW(TAG, "設定 SMSC 失敗");
+                ESP_LOGW(TAG, "設定 SMSC 失败");
             }
         }
 
@@ -370,11 +476,13 @@ void app_main(void) {
         }
     }
 
-    // 启动 Web 控制台
-    web_server_start();
+    ESP_LOGI(TAG, "🌐 内部组件就绪，准备启动 Wi-Fi 与网络栈...");
+    wifi_init_sta();
 
     // 启动定时任务管理器
+#if CONFIG_ENABLE_CRON_TASKER
     cron_tasker_init();
+#endif
 
     ESP_LOGI(TAG, "🚀 系统所有核心服务已成功拉起，运行中...");
 

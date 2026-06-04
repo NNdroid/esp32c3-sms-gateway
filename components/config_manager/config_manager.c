@@ -64,6 +64,13 @@ void config_load_all(void) {
         g_app_config.syslogEnabled = false; // 默认值
     }
 
+    int8_t call_notify_en = 0;
+    if (nvs_get_i8(my_handle, "callNotifyEn", &call_notify_en) == ESP_OK) {
+        g_app_config.callNotifyEnabled = (call_notify_en == 1);
+    } else {
+        g_app_config.callNotifyEnabled = false;
+    }
+
     int32_t syslog_port = 514;
     if (nvs_get_i32(my_handle, "syslogPort", &syslog_port) == ESP_OK) {
         g_app_config.syslogPort = syslog_port;
@@ -113,6 +120,7 @@ void config_save_all(void) {
 
     // 2. 保存整型 / 布尔型
     nvs_set_i8(my_handle, "syslogEn", g_app_config.syslogEnabled ? 1 : 0);
+    nvs_set_i8(my_handle, "callNotifyEn", g_app_config.callNotifyEnabled ? 1 : 0);
     nvs_set_i32(my_handle, "syslogPort", g_app_config.syslogPort);
 
     // 3. 批量保存结构体数组 (Push Channels)

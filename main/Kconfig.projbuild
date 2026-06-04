@@ -1,0 +1,25 @@
+menu "Project optional components"
+
+config ENABLE_CRON_TASKER
+    bool "Enable cron_tasker component"
+    default n
+    help
+      Enable cron_tasker. Disable this option to reduce flash and RAM usage
+      when scheduled tasks are not needed.
+
+config ENABLE_LOG_SERVICE
+    bool "Enable log_service component"
+    default n
+    help
+      Enable log_service syslog forwarding and custom logging wrapper.
+      When disabled, logging falls back to native ESP-IDF logs and syslog
+      forwarding is turned off.
+
+config ENABLE_CALL_PROCESSOR
+    bool "Enable call_processor component"
+    default n
+    help
+      Enable call_processor. Disable this option to remove incoming call handling
+      and save flash/RAM when the device does not need call notification features.
+
+endmenu

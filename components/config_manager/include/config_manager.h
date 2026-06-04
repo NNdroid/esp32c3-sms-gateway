@@ -51,6 +51,7 @@ typedef struct {
     char numberBlackList[256];
     
     bool syslogEnabled;
+    bool callNotifyEnabled;
     char syslogServer[64];
     int  syslogPort;
     
@@ -66,8 +67,23 @@ typedef struct {
 extern app_config_t g_app_config;
 
 // API 声明
+/**
+ * @brief 初始化配置管理器
+ * @note 这个函数会在系统启动时被调用，负责加载配置文件（如果存在）并将其解析到全局配置结构体中。请确保在调用其他任何依赖配置的函数之前先调用这个初始化函数。
+ * @note 配置文件的存储格式可以是 JSON、INI 或者你喜欢的任何格式，只要在实现中正确解析并填充到 g_app_config 中即可。你也可以在这个函数中设置一些默认值，以防配置文件缺失或损坏时系统仍能正常运行。
+ * @note 该函数内部会调用 config_load_all() 来加载配置文件，如果你需要在运行时动态修改配置并保存，可以调用 config_save_all() 将当前的 g_app_config 写回到存储中。
+ * @note 请根据你的存储介质（例如 SPIFFS、NVS 或 SD 卡）来实现 config_load_all() 和 config_save_all() 函数，以确保配置数据能够正确持久化。
+ */
 void config_manager_init(void);
+/**
+ * @brief 加载配置文件并解析到全局配置结构体
+ * @note 该函数会被 config_manager_init() 调用来加载配置文件，你也可以在运行时需要重新加载配置时调用它。请根据你的存储介质来实现这个函数，确保能够正确读取配置数据并填充到 g_app_config 中。
+ */
 void config_load_all(void);
+/**
+ * @brief 保存全局配置结构体到配置文件
+ * @note 该函数会将当前的 g_app_config 写回到存储中，以确保配置的持久化。请根据你的存储介质来实现这个函数。
+ */
 void config_save_all(void);
 
 #endif // CONFIG_MANAGER_H
