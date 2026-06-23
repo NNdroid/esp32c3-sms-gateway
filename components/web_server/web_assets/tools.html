@@ -277,7 +277,77 @@
       .btn-grid { grid-template-columns: 1fr; }
       .at-input-group { flex-direction: column; }
       .at-input-group button { width: 100%; }
-      .floating-status { right: 15px; left: 15px; bottom: 15px; justify-content: center; }
+            .floating-status { right: 15px; left: 15px; bottom: 15px; justify-content: center; }
+    }
+
+    /* eSIM profile 卡片 */
+    .profile-card {
+      border: 1px solid var(--border-color);
+      padding: 18px;
+      margin-bottom: 16px;
+      border-radius: var(--radius-md);
+      background: var(--input-bg);
+      transition: all 0.2s ease;
+    }
+    .profile-card:hover { border-color: var(--primary); }
+    .profile-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .profile-name { font-size: 16px; font-weight: 700; }
+    .state-badge {
+      font-size: 12px; padding: 4px 12px; border-radius: 20px; font-weight: 600;
+    }
+    .state-enabled { background: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
+    .state-disabled { background: #f3f4f6; color: #6b7280; border: 1px solid #d1d5db; }
+    .state-unknown { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+    .profile-details {
+      font-size: 13px; color: var(--text-muted); margin-bottom: 12px; line-height: 1.8;
+    }
+    .profile-details span { color: var(--text-main); font-weight: 500; }
+    .profile-actions {
+      display: flex; gap: 10px; flex-wrap: wrap;
+    }
+    .profile-actions button {
+      flex: 1; min-width: 120px; padding: 10px; font-size: 13px;
+    }
+    .profile-empty { text-align: center; padding: 30px; color: var(--text-muted); font-size: 15px; }
+
+    /* 确认删除弹窗 */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-box {
+      background: white;
+      padding: 24px;
+      border-radius: var(--radius-lg);
+      max-width: 400px;
+      width: 90%;
+      box-shadow: var(--shadow-lg);
+    }
+    .modal-box h3 { margin-bottom: 12px; font-size: 18px; }
+    .modal-box p { margin-bottom: 16px; color: var(--text-muted); font-size: 14px; }
+    .modal-box .step-info {
+      font-size: 13px;
+      background: #fffbeb;
+      padding: 8px 12px;
+      border-radius: var(--radius-sm);
+      margin-bottom: 16px;
+      color: #92400e;
+    }
+    .modal-box .btn-grid-modal {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
     }
   </style>
 </head>
@@ -371,7 +441,43 @@
         <input type="text" id="atCmd" placeholder="輸入 AT 指令，例如: AT+CSQ">
         <button type="button" onclick="sendAT()" id="atBtn" class="btn-primary">發送指令</button>
       </div>
-      <button type="button" class="btn-slate" onclick="document.getElementById('atLog').innerHTML='';" style="margin-top: 12px;">🧹 清空終端機面板</button>
+            <button type="button" class="btn-slate" onclick="document.getElementById('atLog').innerHTML='';" style="margin-top: 12px;">🧹 清空終端機面板</button>
+    </div>
+
+    <!-- ================= eSIM 管理区域 (动态显示) ================= -->
+    <div id="esimSection" class="section" style="display:none;">
+      <div class="section-title">📱 eSIM 管理</div>
+      <div class="status status-info" id="esimStatusBar">⏳ 檢查 eSIM 狀態...</div>
+      
+      <div id="esimInfoDisplay" style="display:none;">
+        <table class="info-table">
+          <tr><td>eSIM 支持</td><td id="esimSupported">-</td></tr>
+          <tr><td>EID</td><td id="esimEid">-</td></tr>
+        </table>
+      </div>
+
+      <div class="btn-grid" id="esimActionBtns" style="display:none;">
+        <button type="button" class="btn-purple" onclick="queryEsimInfo()">📋 查詢 eSIM 信息</button>
+        <button type="button" class="btn-cyan" onclick="refreshProfiles()">🔄 刷新配置列表</button>
+      </div>
+
+      <div id="profilesContainer" style="margin-top:16px;">
+        <div class="profile-empty" style="text-align:center;padding:20px;color:var(--text-muted);">點擊上方按鈕加載 Profile</div>
+      </div>
+    </div>
+
+  </div><!-- 关闭 container -->
+
+  <!-- 确认删除弹窗 (fixed定位，不占用页面空间) -->
+  <div class="modal-overlay" id="deleteModal" onclick="if(event.target===this) closeDeleteModal()">
+    <div class="modal-box" onclick="event.stopPropagation()">
+      <h3>⚠️ 確認刪除</h3>
+      <p id="deleteModalText">刪除 Profile 後無法恢復！</p>
+      <div class="step-info" id="deleteStepInfo">請連續點擊下方紅色按鈕 3 次確認刪除 (1/3)</div>
+      <div class="btn-grid-modal">
+        <button class="btn-slate" onclick="closeDeleteModal()">取消</button>
+        <button class="btn-danger" id="confirmDeleteBtn" onclick="confirmDelete()">確認刪除 (1/3)</button>
+      </div>
     </div>
   </div>
 
@@ -436,7 +542,7 @@
       r.style.display = 'block'; r.className = 'result-box result-loading';
       r.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在執行 Ping (4次連發)，請稍候...';
       isPinging = true;
-      fetch('/api/ping', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ target: t }) })
+      _trackFetch('/api/ping', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ target: t }) })
       .then(res=>{ if(checkAuthError(res)) throw new Error(); return res.json(); })
       .then(d => { 
           b.disabled = false; b.innerHTML = '🚀 執行 Ping';
@@ -449,8 +555,8 @@
     function queryFlightMode() {
       let r = document.getElementById('flightResult');
       r.style.display = 'block'; r.className = 'result-box result-loading'; r.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在查詢飛行模式狀態...';
-      fetch('/api/flight?action=query').then(res=>{ if(checkAuthError(res)) throw new Error(); return res.json(); }).then(d => {
-          r.className = d.success ? 'result-box result-info' : 'result-box result-error'; r.innerHTML = d.success ? d.message : '❌ 查詢失敗: ' + d.message;
+      _trackFetch('/api/flight?action=query').then(res=>{ if(checkAuthError(res)) throw new Error(); return res.json(); }).then(d => {
+             r.className = d.success ? 'result-box result-info' : 'result-box result-error'; r.innerHTML = d.success ? d.message : '❌ 查詢失敗: ' + d.message;
       }).catch(e => { r.className = 'result-box result-error'; r.innerText = '❌ 請求伺服器失敗。'; });
     }
     
@@ -458,8 +564,8 @@
       if (!confirm('確定要切換飛行模式嗎？\n開啟飛行模式後模組將無法收發簡訊與連接網路。')) return;
       let b = document.getElementById('flightBtn'), r = document.getElementById('flightResult');
       b.disabled = true; r.style.display = 'block'; r.className = 'result-box result-loading'; r.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 正在切換硬體狀態...';
-      fetch('/api/flight?action=toggle').then(res=>{ if(checkAuthError(res)) throw new Error(); return res.json(); }).then(d => {
-          b.disabled = false; r.className = d.success ? 'result-box result-success' : 'result-box result-error';
+      _trackFetch('/api/flight?action=toggle').then(res=>{ if(checkAuthError(res)) throw new Error(); return res.json(); }).then(d => {
+             b.disabled = false; r.className = d.success ? 'result-box result-success' : 'result-box result-error';
           r.innerHTML = (d.success ? '✅ ' : '❌ 切換失敗: ') + d.message;
       }).catch(e => { b.disabled = false; r.className = 'result-box result-error'; r.innerText = '❌ 請求伺服器失敗。'; });
     }
@@ -568,9 +674,14 @@
     document.getElementById('atCmd').addEventListener('keydown', function(e) { if (e.key === 'Enter') sendAT(); });
     
     // 頁面初始化 & 全局狀態輪詢
-    let isPinging = false;
+        let isPinging = false;
+    let _pendingOps = 0;
+    function _trackFetch(url, options) {
+      _pendingOps++;
+      return fetch(url, options).finally(() => { _pendingOps--; });
+    }
     function updateSysStatus() {
-      if (isPinging) return;
+      if (isPinging || _pendingOps > 0) return;
       fetch('/api/sysinfo').then(r=>{ if(checkAuthError(r)) throw new Error('Unauthorized'); return r.json(); }).then(data => {
         if(data.ip) document.getElementById('status').innerHTML = '🌐 設備 IP: <strong>' + data.ip + '</strong> &nbsp;|&nbsp; 韌體版本: <strong style="color:var(--primary);">' + (data.version || '未知') + '</strong>';
         var widget = document.getElementById('simFloatingStatus');
@@ -603,9 +714,223 @@
         }
       }).catch(e=>{});
       
-      updateSysStatus();
-      setInterval(updateSysStatus, 3000);
+            updateSysStatus();
+      setInterval(updateSysStatus, 15000);
+
+      // 检查 eSIM 支持
+      fetch('/api/esim/status')
+      .then(r => { if(checkAuthError(r)) throw new Error(); return r.json(); })
+      .then(data => {
+        const esimSection = document.getElementById('esimSection');
+        if (data.supported) {
+          esimSection.style.display = 'block';
+          document.getElementById('esimStatusBar').className = 'status status-success';
+          document.getElementById('esimStatusBar').innerHTML = '✅ 模组支持 eSIM (eUICC) 功能';
+          document.getElementById('esimSupported').textContent = '✅ 支持';
+          document.getElementById('esimSupported').style.color = '#065f46';
+          document.getElementById('esimInfoDisplay').style.display = 'block';
+          document.getElementById('esimActionBtns').style.display = 'grid';
+        } else {
+          esimSection.style.display = 'none';
+        }
+      })
+      .catch(e => {});
     });
+
+    // ==================== eSIM 功能 ====================
+    let currentProfiles = [];
+    let deleteTarget = null;
+    let deleteStep = 0;
+
+    function showEsimResult(success, msg) {
+      const box = document.getElementById('queryResult');
+      box.style.display = 'block';
+      box.className = 'result-box ' + (success ? 'result-success' : 'result-error');
+      box.innerHTML = (success ? '✅ ' : '❌ ') + msg;
+      if (success) setTimeout(() => { box.style.display = 'none'; }, 5000);
+    }
+
+    function showEsimLoading(msg) {
+      const box = document.getElementById('queryResult');
+      box.style.display = 'block';
+      box.className = 'result-box result-loading';
+      box.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> ' + msg;
+    }
+
+    function openDeleteModal(iccid, nickname) {
+      deleteTarget = iccid;
+      deleteStep = 0;
+      document.getElementById('deleteModalText').innerHTML = '即將刪除 Profile: <strong>' + (nickname || iccid) + '</strong>';
+      document.getElementById('deleteStepInfo').textContent = '請連續點擊下方紅色按鈕 3 次確認刪除 (1/3)';
+      document.getElementById('confirmDeleteBtn').textContent = '確認刪除 (1/3)';
+      document.getElementById('confirmDeleteBtn').className = 'btn-danger';
+      document.getElementById('deleteModal').classList.add('active');
+    }
+  
+    function closeDeleteModal() {
+      document.getElementById('deleteModal').classList.remove('active');
+      deleteTarget = null;
+      deleteStep = 0;
+    }
+  
+    function confirmDelete() {
+      deleteStep++;
+      const btn = document.getElementById('confirmDeleteBtn');
+      const stepInfo = document.getElementById('deleteStepInfo');
+
+      if (deleteStep === 1) {
+        stepInfo.textContent = '⚠️ 請再點擊 2 次確認刪除 (2/3)';
+        btn.textContent = '確認刪除 (2/3)';
+        return;
+      }
+      if (deleteStep === 2) {
+        stepInfo.textContent = '🚨 最後確認！點擊後將立即刪除 (3/3)';
+        btn.textContent = '確認刪除 (3/3)';
+        btn.className = 'btn-danger';
+        btn.style.animation = 'pulse-red 0.5s infinite';
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerHTML = '<span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 刪除中...';
+      
+
+
+
+
+            _trackFetch('/api/esim/switch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ iccid: deleteTarget, action: 'delete' })
+      })
+      .then(r => { if(checkAuthError(r)) throw new Error('Unauthorized'); return r.json(); })
+      .then(data => {
+        closeDeleteModal();
+        if (data.success) {
+          showEsimResult(true, data.message);
+          refreshProfiles();
+        } else {
+          showEsimResult(false, data.message);
+        }
+      })
+      .catch(err => {
+        if (err.message !== 'Unauthorized') showEsimResult(false, '网络错误: ' + err);
+        closeDeleteModal();
+      });
+    }
+
+    function queryEsimInfo() {
+      showEsimLoading('正在查詢 eSIM 信息...');
+      
+            _trackFetch('/api/esim/eid')
+      .then(r => { if(checkAuthError(r)) throw new Error(); return r.json(); })
+      .then(data => {
+        if (data.success) {
+          document.getElementById('esimEid').textContent = data.eid;
+          showEsimResult(true, 'EID 獲取成功: ' + data.eid);
+        } else {
+          document.getElementById('esimEid').textContent = '獲取失敗';
+          showEsimResult(false, data.message);
+        }
+      })
+      .catch(e => {
+        document.getElementById('esimEid').textContent = '獲取失敗';
+        showEsimResult(false, '請求失敗');
+      });
+    }
+
+    function refreshProfiles() {
+      showEsimLoading('正在加載 Profile 列表...');
+      const container = document.getElementById('profilesContainer');
+      container.innerHTML = '<div class="profile-empty"><span style="display:inline-block; animation:spin 2s linear infinite;">⏳</span> 加載中...</div>';
+
+            _trackFetch('/api/esim/profiles')
+      .then(r => { if(checkAuthError(r)) throw new Error(); return r.json(); })
+      .then(data => {
+        if (!data.success) {
+          container.innerHTML = '<div class="profile-empty">❌ ' + data.message + '</div>';
+          showEsimResult(false, data.message);
+          return;
+        }
+
+        currentProfiles = data.profiles || [];
+        if (currentProfiles.length === 0) {
+          container.innerHTML = '<div class="profile-empty">📭 未找到任何 eSIM Profile</div>';
+          showEsimResult(true, '沒有找到任何 Profile');
+          return;
+        }
+
+        let html = '';
+        for (let i = 0; i < currentProfiles.length; i++) {
+          const p = currentProfiles[i];
+          const isEnabled = p.state === 'enabled';
+          const isDisabled = p.state === 'disabled';
+          const stateLabel = isEnabled ? '✅ 已啟用' : (isDisabled ? '⏸️ 已禁用' : '❓ 未知');
+          const stateClass = isEnabled ? 'state-enabled' : (isDisabled ? 'state-disabled' : 'state-unknown');
+          const displayName = p.nickname || p.profileName || ('Profile #' + (i + 1));
+          const safeName = displayName.replace(/'/g, "\\'");
+
+          html += `
+            <div class="profile-card">
+              <div class="profile-card-header">
+                <div class="profile-name">${displayName}</div>
+                <span class="state-badge ${stateClass}">${stateLabel}</span>
+              </div>
+              <div class="profile-details">
+                ICCID: <span>${p.iccid || '-'}</span><br>
+                AID: <span>${p.aid || '-'}</span><br>
+                運營商: <span>${p.operator || '-'}</span><br>
+                Profile 類別: <span>${p.class >= 0 ? 'Test (' + p.class + ')' : (p.class === -1 ? 'Operational' : '未知 (' + p.class + ')')}</span>
+              </div>
+              <div class="profile-actions">
+                ${isDisabled ? '<button class="btn-success" onclick="doProfileAction(\'' + p.iccid + '\',\'enable\')">▶️ 啟用</button>' : ''}
+                ${isEnabled ? '<button class="btn-primary" onclick="doProfileAction(\'' + p.iccid + '\',\'switch\')">🔄 切換至此</button>' : ''}
+                ${isEnabled ? '<button class="btn-warning" onclick="doProfileAction(\'' + p.iccid + '\',\'disable\')">⏸️ 禁用</button>' : ''}
+                <button class="btn-danger" onclick="openDeleteModal('${p.iccid}','')">🗑️ 刪除</button>
+              </div>
+            </div>
+          `;
+        }
+
+        container.innerHTML = html;
+        showEsimResult(true, '成功加載 ' + currentProfiles.length + ' 個 Profile');
+      })
+      .catch(e => {
+        container.innerHTML = '<div class="profile-empty">❌ 加載失敗，請檢查設備連接</div>';
+        showEsimResult(false, '請求失敗');
+      });
+    }
+
+    function doProfileAction(iccid, action) {
+      const actionLabels = { 'enable': '啟用', 'switch': '切換', 'disable': '禁用' };
+      const label = actionLabels[action] || action;
+      
+      if (!confirm('確定要' + label + '此 Profile 嗎？\n\nICCID: ' + iccid + '\n' + (action === 'disable' ? '禁用後該配置將無法使用' : ''))) return;
+
+      showEsimLoading('正在' + label + ' Profile...');
+
+            _trackFetch('/api/esim/switch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ iccid: iccid, action: action })
+      })
+      .then(r => { if(checkAuthError(r)) throw new Error(); return r.json(); })
+      .then(data => {
+        if (data.success) {
+          showEsimResult(true, data.message);
+          setTimeout(refreshProfiles, 2000);
+        } else {
+          if (data.catBusy) {
+            if (confirm('⚠️ ' + data.message + '\n\n是否要再次嘗試？')) {
+              doProfileAction(iccid, action);
+            }
+          } else {
+            showEsimResult(false, data.message);
+          }
+        }
+      })
+      .catch(e => { showEsimResult(false, '請求失敗'); });
+    }
   </script>
 </body>
 </html>

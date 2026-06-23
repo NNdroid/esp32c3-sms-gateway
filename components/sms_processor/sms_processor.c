@@ -53,7 +53,9 @@ typedef struct {
     sms_part_t parts[MAX_CONCAT_PARTS];
 } concat_sms_t;
 
-static concat_sms_t concat_buffer[MAX_CONCAT_MESSAGES];
+// concat_buffer 改为指针，由 malloc 动态分配，不常驻BSS段
+// 长短信拼接在短信推送中是小概率事件，没必要常驻 ~24KB
+static concat_sms_t *concat_buffer = NULL;
 
 // ================= Helper functions =================
 
@@ -110,7 +112,14 @@ bool sms_processor_is_blacklisted(const char* sender) {
 // ================= 长短信拼接逻辑 =================
 
 static void init_concat_buffer(void) {
-    memset(concat_buffer, 0, sizeof(concat_buffer));
+    if (!concat_buffer) {
+        concat_buffer = (concat_sms_t *)calloc(MAX_CONCAT_MESSAGES, sizeof(concat_sms_t));
+        if (!concat_buffer) {
+            ESP_LOGE(TAG, "无法分配长短信拼接缓冲区！长短信功能将不可用");
+        }
+    } else {
+        memset(concat_buffer, 0, MAX_CONCAT_MESSAGES * sizeof(concat_sms_t));
+    }
 }
 
 static int find_or_create_concat_slot(int ref, const char* sdr, int tot) {
@@ -214,9 +223,11 @@ static void sms_processor_task(void *pvParameters) {
                             }
                         }
                         
-                        if (concat_buffer[slot].receivedParts >= decoded_sms.total_parts) {
-                            ESP_LOGI(TAG, "✅ 长短信拼接完成，准备推送");
-                            static char full_text[160 * 3 * MAX_CONCAT_PARTS];
+                                                if (concat_buffer[slot].receivedParts >= decoded_sms.total_parts) {
+                                                    ESP_LOGI(TAG, "长短信拼接完成，准备推送");
+                                                    // static 局部变量，随 task 常驻，避免栈溢出
+                                                    // full_text[4800] + concat_buffer ~24KB 分别从栈和 BSS 解放
+                                                    static char full_text[160 * 3 * MAX_CONCAT_PARTS];
                             full_text[0] = '\0';
                             int indexes_to_delete[MAX_CONCAT_PARTS];
                             int del_count = 0;
@@ -255,7 +266,7 @@ static void sms_processor_task(void *pvParameters) {
             if (concat_buffer[i].inUse) {
                 uint32_t elapsed_ms = (now - concat_buffer[i].firstPartTime) * portTICK_PERIOD_MS;
                 if (elapsed_ms >= CONCAT_TIMEOUT_MS) {
-                    ESP_LOGW(TAG, "⚠️ 长短信等待分片超时，强制转发已收到的部分");
+                                                                                ESP_LOGW(TAG, "长短信等待分片超时，强制转发已收到的部分");
                     
                     static char full_text[160 * 3 * MAX_CONCAT_PARTS];
                     full_text[0] = '\0';
@@ -391,6 +402,6 @@ void sms_processor_init(void) {
 
     esp_event_handler_instance_register(MODEM_EVENT, MODEM_EVENT_SMS_RECEIVED, &modem_sms_urc_handler, NULL, NULL);
     
-    // 启动处理 Task
-    xTaskCreate(sms_processor_task, "sms_proc_task", 5000, NULL, 4, NULL);
+                // 启动处理 Task
+    xTaskCreate(sms_processor_task, "sms_proc_task", 5120, NULL, 4, NULL);
 }

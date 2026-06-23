@@ -23,7 +23,8 @@
 #define SYSLOG_QUEUE_SIZE 20
 #define SYSLOG_PAYLOAD_MAX (SYSLOG_MAX_MESSAGE + 128)
 
-typedef struct {
+typedef struct
+{
     char payload[SYSLOG_PAYLOAD_MAX];
 } syslog_item_t;
 
@@ -37,31 +38,43 @@ static struct sockaddr_in cached_syslog_addr = {0};
 static int cached_syslog_socket = -1;
 static bool cached_syslog_ready = false;
 
-static bool log_service_should_forward(void) {
+static bool log_service_should_forward(void)
+{
     return log_service_forwarding_ready && g_app_config.syslogEnabled && g_app_config.syslogServer[0] != '\0' && g_app_config.syslogPort > 0;
 }
 
-static int log_service_severity(int level) {
-    switch (level) {
-        case ESP_LOG_ERROR: return 3;
-        case ESP_LOG_WARN: return 4;
-        case ESP_LOG_INFO: return 6;
-        case ESP_LOG_DEBUG: return 7;
-        case ESP_LOG_VERBOSE: return 7;
-        default: return 6;
+static int log_service_severity(int level)
+{
+    switch (level)
+    {
+    case ESP_LOG_ERROR:
+        return 3;
+    case ESP_LOG_WARN:
+        return 4;
+    case ESP_LOG_INFO:
+        return 6;
+    case ESP_LOG_DEBUG:
+        return 7;
+    case ESP_LOG_VERBOSE:
+        return 7;
+    default:
+        return 6;
     }
 }
 
-static void log_service_build_timestamp(char* buffer, size_t len) {
+static void log_service_build_timestamp(char *buffer, size_t len)
+{
     time_t now = time(NULL);
-    if (now <= 0) {
+    if (now <= 0)
+    {
         strncpy(buffer, "-", len);
         buffer[len - 1] = '\0';
         return;
     }
 
     struct tm timeinfo;
-    if (gmtime_r(&now, &timeinfo) == NULL) {
+    if (gmtime_r(&now, &timeinfo) == NULL)
+    {
         strncpy(buffer, "-", len);
         buffer[len - 1] = '\0';
         return;
@@ -70,12 +83,16 @@ static void log_service_build_timestamp(char* buffer, size_t len) {
     strftime(buffer, len, "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
 }
 
-static void log_service_get_hostname(char* out, size_t len) {
-    if (len == 0) {
+static void log_service_get_hostname(char *out, size_t len)
+{
+    if (len == 0)
+    {
         return;
     }
-    if (!cached_hostname_ready) {
-        if (gethostname(cached_hostname, sizeof(cached_hostname)) != 0 || cached_hostname[0] == '\0') {
+    if (!cached_hostname_ready)
+    {
+        if (gethostname(cached_hostname, sizeof(cached_hostname)) != 0 || cached_hostname[0] == '\0')
+        {
             strncpy(cached_hostname, "-", sizeof(cached_hostname));
             cached_hostname[sizeof(cached_hostname) - 1] = '\0';
         }
@@ -85,33 +102,39 @@ static void log_service_get_hostname(char* out, size_t len) {
     out[len - 1] = '\0';
 }
 
-static void log_service_get_ipaddr(char* out, size_t len) {
-    if (len == 0) {
+static void log_service_get_ipaddr(char *out, size_t len)
+{
+    if (len == 0)
+    {
         return;
     }
 
     out[0] = '\0';
-    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (netif == NULL) {
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif == NULL)
+    {
         strncpy(out, "-", len);
         out[len - 1] = '\0';
         return;
     }
 
     esp_netif_ip_info_t ip_info;
-    if (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK || ip_info.ip.addr == 0) {
+    if (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK || ip_info.ip.addr == 0)
+    {
         strncpy(out, "-", len);
         out[len - 1] = '\0';
         return;
     }
 
-    if (inet_ntop(AF_INET, &ip_info.ip, out, len) == NULL) {
+    if (inet_ntop(AF_INET, &ip_info.ip, out, len) == NULL)
+    {
         strncpy(out, "-", len);
         out[len - 1] = '\0';
     }
 }
 
-static void log_service_build_syslog_payload(int level, const char* tag, const char* message, char* out, size_t out_len) {
+static void log_service_build_syslog_payload(int level, const char *tag, const char *message, char *out, size_t out_len)
+{
     char timestamp[32];
     char hostname[SYSLOG_HOSTNAME_MAX];
     char ip_address[32];
@@ -128,8 +151,10 @@ static void log_service_build_syslog_payload(int level, const char* tag, const c
                        ip_address,
                        hostname,
                        tag);
-    if (len < 0 || (size_t)len >= out_len) {
-        if (out_len > 0) {
+    if (len < 0 || (size_t)len >= out_len)
+    {
+        if (out_len > 0)
+        {
             out[out_len - 1] = '\0';
         }
         return;
@@ -138,36 +163,44 @@ static void log_service_build_syslog_payload(int level, const char* tag, const c
     snprintf(out + len, out_len - (size_t)len, "%s", message);
 }
 
-static bool log_service_resolve_server(const char* server, int port) {
-    if (!server || server[0] == '\0' || port <= 0) {
+static bool log_service_resolve_server(const char *server, int port)
+{
+    if (!server || server[0] == '\0' || port <= 0)
+    {
         return false;
     }
 
-    if (cached_syslog_ready && cached_syslog_port == port && strcmp(cached_syslog_server, server) == 0) {
+    if (cached_syslog_ready && cached_syslog_port == port && strcmp(cached_syslog_server, server) == 0)
+    {
         return true;
     }
 
-    if (cached_syslog_socket >= 0) {
+    if (cached_syslog_socket >= 0)
+    {
         close(cached_syslog_socket);
         cached_syslog_socket = -1;
     }
     cached_syslog_ready = false;
 
     struct in_addr addr;
-    if (inet_pton(AF_INET, server, &addr) == 1) {
+    if (inet_pton(AF_INET, server, &addr) == 1)
+    {
         cached_syslog_addr.sin_family = AF_INET;
         cached_syslog_addr.sin_port = htons(port);
         cached_syslog_addr.sin_addr = addr;
-    } else {
+    }
+    else
+    {
         struct addrinfo hints;
-        struct addrinfo* result = NULL;
+        struct addrinfo *result = NULL;
         memset(&hints, 0, sizeof(hints));
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_DGRAM;
 
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%d", port);
-        if (getaddrinfo(server, port_str, &hints, &result) != 0 || result == NULL) {
+        if (getaddrinfo(server, port_str, &hints, &result) != 0 || result == NULL)
+        {
             return false;
         }
 
@@ -176,7 +209,8 @@ static bool log_service_resolve_server(const char* server, int port) {
     }
 
     cached_syslog_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (cached_syslog_socket < 0) {
+    if (cached_syslog_socket < 0)
+    {
         return false;
     }
 
@@ -187,14 +221,17 @@ static bool log_service_resolve_server(const char* server, int port) {
     return true;
 }
 
-static bool log_service_send_udp(const char* server, int port, const char* payload) {
-    if (!log_service_resolve_server(server, port)) {
+static bool log_service_send_udp(const char *server, int port, const char *payload)
+{
+    if (!log_service_resolve_server(server, port))
+    {
         return false;
     }
 
     ssize_t sent = sendto(cached_syslog_socket, payload, strlen(payload), 0,
-                          (struct sockaddr*)&cached_syslog_addr, sizeof(cached_syslog_addr));
-    if (sent == (ssize_t)strlen(payload)) {
+                          (struct sockaddr *)&cached_syslog_addr, sizeof(cached_syslog_addr));
+    if (sent == (ssize_t)strlen(payload))
+    {
         return true;
     }
 
@@ -204,19 +241,25 @@ static bool log_service_send_udp(const char* server, int port, const char* paylo
     return false;
 }
 
-static void syslog_worker_task(void *pvParameters) {
+static void syslog_worker_task(void *pvParameters)
+{
     syslog_item_t item;
-    while (1) {
-        if (xQueueReceive(syslog_queue, &item, portMAX_DELAY) == pdTRUE) {
-            if (log_service_should_forward()) {
+    while (1)
+    {
+        if (xQueueReceive(syslog_queue, &item, portMAX_DELAY) == pdTRUE)
+        {
+            if (log_service_should_forward())
+            {
                 log_service_send_udp(g_app_config.syslogServer, g_app_config.syslogPort, item.payload);
             }
         }
     }
 }
 
-static void log_service_vsyslog(int level, const char* tag, const char* format, va_list ap) {
-    if (!syslog_queue) return;
+static void log_service_vsyslog(int level, const char *tag, const char *format, va_list ap)
+{
+    if (!syslog_queue)
+        return;
 
     char message[SYSLOG_MAX_MESSAGE];
     vsnprintf(message, sizeof(message), format, ap);
@@ -227,55 +270,69 @@ static void log_service_vsyslog(int level, const char* tag, const char* format, 
     xQueueSend(syslog_queue, &item, 0);
 }
 
-void log_service_init(void) {
+void log_service_init(void)
+{
     log_service_forwarding_ready = false;
-    if (syslog_queue == NULL) {
+    if (syslog_queue == NULL)
+    {
         syslog_queue = xQueueCreate(SYSLOG_QUEUE_SIZE, sizeof(syslog_item_t));
-        xTaskCreate(syslog_worker_task, "syslog_task", 2048, NULL, 3, NULL);
+        xTaskCreate(syslog_worker_task, "syslog_task", 3072, NULL, 3, NULL);
     }
 }
 
-void log_service_set_ready(bool ready) {
+void log_service_set_ready(bool ready)
+{
     log_service_forwarding_ready = ready;
 }
 
-void log_service_voutput(int level, const char* tag, const char* format, va_list ap) {
+void log_service_voutput(int level, const char *tag, const char *format, va_list ap)
+{
     va_list ap_copy;
     va_copy(ap_copy, ap);
 
-    #ifndef ESP_LOG_CONFIG_INIT
-    #define ESP_LOG_CONFIG_INIT(l) l
-    #endif
+#ifndef ESP_LOG_CONFIG_INIT
+#define ESP_LOG_CONFIG_INIT(l) l
+#endif
 
-    size_t fmt_len = strlen(format);
-    if (fmt_len + 3 < 256) {
-        char new_format[256];
-        snprintf(new_format, sizeof(new_format), "%s\r\n", format);
-        esp_log_va(ESP_LOG_CONFIG_INIT(level), tag, new_format, ap);
-    } else {
-        esp_log_va(ESP_LOG_CONFIG_INIT(level), tag, format, ap);
-    }
-
-    if (log_service_should_forward()) {
+    if (log_service_should_forward())
+    {
         log_service_vsyslog(level, tag, format, ap_copy);
+    }
+    else
+    {
+        size_t fmt_len = strlen(format);
+        if (fmt_len + 3 < 256)
+        {
+            char new_format[256];
+            snprintf(new_format, sizeof(new_format), "%s\r\n", format);
+            esp_log_va(ESP_LOG_CONFIG_INIT(level), tag, new_format, ap);
+        }
+        else
+        {
+            esp_log_va(ESP_LOG_CONFIG_INIT(level), tag, format, ap);
+        }
     }
 
     va_end(ap_copy);
 }
 #else
 
-void log_service_init(void) {
+void log_service_init(void)
+{
 }
 
-void log_service_set_ready(bool ready) {
+void log_service_set_ready(bool ready)
+{
     (void)ready;
 }
 
-void log_service_voutput(int level, const char* tag, const char* format, va_list ap) {
-    #ifndef ESP_LOG_CONFIG_INIT
-    #define ESP_LOG_CONFIG_INIT(l) l
-    #endif
+void log_service_voutput(int level, const char *tag, const char *format, va_list ap)
+{
+#ifndef ESP_LOG_CONFIG_INIT
+#define ESP_LOG_CONFIG_INIT(l) l
+#endif
 
+    /*
     size_t fmt_len = strlen(format);
     if (fmt_len + 3 < 256) {
         char new_format[256];
@@ -284,5 +341,6 @@ void log_service_voutput(int level, const char* tag, const char* format, va_list
     } else {
         esp_log_va(ESP_LOG_CONFIG_INIT(level), tag, format, ap);
     }
+    */
 }
 #endif

@@ -1,4 +1,4 @@
-set(REQUIRES_LIST config_manager modem_driver sms_processor cron_tasker web_server network_provisioning call_processor)
+set(REQUIRES_LIST config_manager modem_driver sms_processor cron_tasker web_server network_provisioning call_processor esim_manager)
 
 idf_component_register(
     SRCS "main.c"

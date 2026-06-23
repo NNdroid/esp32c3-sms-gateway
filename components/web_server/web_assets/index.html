@@ -739,7 +739,7 @@
     document.addEventListener('DOMContentLoaded', () => {
       renderChannels();
       updateSysStatus();
-      setInterval(updateSysStatus, 3000);
+      setInterval(updateSysStatus, 15000);
 
       fetch('/api/config').then(r=>{ if(checkAuthError(r)) throw new Error('Unauthorized'); return r.json(); }).then(data => {
         document.querySelector('[name=webUser]').value = 'admin';

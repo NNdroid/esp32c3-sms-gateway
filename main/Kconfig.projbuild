@@ -1,25 +1,60 @@
 menu "Project optional components"
 
-config ENABLE_CRON_TASKER
-    bool "Enable cron_tasker component"
-    default n
-    help
-      Enable cron_tasker. Disable this option to reduce flash and RAM usage
-      when scheduled tasks are not needed.
+    config ENABLE_CRON_TASKER
+        bool "Enable cron_tasker component"
+        default n
+        help
+            Enable cron_tasker. Disable this option to reduce flash and RAM usage
+            when scheduled tasks are not needed.
 
-config ENABLE_LOG_SERVICE
-    bool "Enable log_service component"
-    default n
-    help
-      Enable log_service syslog forwarding and custom logging wrapper.
-      When disabled, logging falls back to native ESP-IDF logs and syslog
-      forwarding is turned off.
+    config ENABLE_LOG_SERVICE
+        bool "Enable log_service component"
+        default n
+        help
+            Enable log_service syslog forwarding and custom logging wrapper.
+            When disabled, logging falls back to native ESP-IDF logs and syslog
+            forwarding is turned off.
 
-config ENABLE_CALL_PROCESSOR
-    bool "Enable call_processor component"
-    default n
-    help
-      Enable call_processor. Disable this option to remove incoming call handling
-      and save flash/RAM when the device does not need call notification features.
+    config ENABLE_CALL_PROCESSOR
+        bool "Enable call_processor component"
+        default n
+        help
+            Enable call_processor. Disable this option to remove incoming call handling
+            and save flash/RAM when the device does not need call notification features.
+
+    menu "Wi-Fi Provisioning Settings"
+    
+        choice PROVISION_METHOD
+            prompt "Select Wi-Fi Provisioning Method"
+            default PROVISION_METHOD_BLE
+            help
+                选择设备获取 Wi-Fi 凭证的方式。
+
+            config PROVISION_METHOD_BLE
+                bool "Bluetooth Provisioning (BLE)"
+                help
+                    使用 ESP-IDF 的 BLE 配网管理器 (wifi_provisioning) 进行配网。
+
+            config PROVISION_METHOD_HARDCODED
+                bool "Hardcoded Credentials"
+                help
+                    在编译时写死 Wi-Fi 的 SSID 和密码。
+        endchoice
+
+        config WIFI_SSID
+            string "Wi-Fi SSID"
+            depends on PROVISION_METHOD_HARDCODED
+            default "your_wifi_ssid"
+            help
+                输入你想连接的 Wi-Fi 名称。
+
+        config WIFI_PASSWORD
+            string "Wi-Fi Password"
+            depends on PROVISION_METHOD_HARDCODED
+            default "your_wifi_password"
+            help
+                输入你想连接的 Wi-Fi 密码。
+
+    endmenu
 
 endmenu

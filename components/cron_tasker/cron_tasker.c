@@ -235,14 +235,14 @@ esp_err_t cron_tasker_init(void) {
         return ESP_FAIL;
     }
 
-    if (xTaskCreate(cron_action_task, "cron_action", 4096, NULL, 3, NULL) != pdPASS) {
+    if (xTaskCreate(cron_action_task, "cron_action", 7000, NULL, 3, NULL) != pdPASS) {
         ESP_LOGE(TAG, "创建 Cron 动作任务失败");
         vQueueDelete(cron_action_queue);
         cron_action_queue = NULL;
         return ESP_FAIL;
     }
 
-    BaseType_t ret = xTaskCreate(cron_worker_task, "cron_worker", 4096, NULL, 2, NULL);
+    BaseType_t ret = xTaskCreate(cron_worker_task, "cron_worker", 7000, NULL, 2, NULL);
     if (ret == pdPASS) {
         return ESP_OK;
     }

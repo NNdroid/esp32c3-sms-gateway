@@ -10,11 +10,10 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_sntp.h"
+#include "esp_mac.h"
 #include "driver/gpio.h"
 
-#include "network_provisioning/manager.h"
-#include "network_provisioning/scheme_ble.h"
-
+#include "esim_manager.h"
 #include "config_manager.h"
 #include "modem_driver.h"
 #include "push_service.h"
@@ -26,6 +25,9 @@
 #include "web_server.h"
 
 static const char *TAG = "APP_MAIN";
+// ⚠️ 注意：LwIP 底层只保存主机名字符串的指针，不会拷贝它的内容！
+// 因此存放主机名的内存必须在整个网络生命周期内有效。这里使用 static 变量。
+static char global_hostname[32] = {0};
 
 // 定义 LED 引脚
 #define LED_BUILTIN 8
@@ -37,11 +39,32 @@ static const char *TAG = "APP_MAIN";
 #define PROV_PIN "20260529"
 
 static int s_retry_num = 0;
-static bool s_provisioning_started = false;
 EventGroupHandle_t s_net_event_group;
 
-// 前置声明
-static void start_ble_provisioning(void);
+void set_unique_hostname(esp_netif_t *netif)
+{
+    uint8_t mac[6];
+    
+    // 1. 读取 Wi-Fi Station 的 Base MAC 地址
+    esp_err_t ret = esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read MAC address");
+        return;
+    }
+
+    // 2. 拼接字符串：CONFIG_IDF_TARGET 会自动转为 "esp32", "esp32s3" 等
+    // mac[3], mac[4], mac[5] 即为 MAC 地址的最后 3 个字节（即后 6 位十六进制）
+    snprintf(global_hostname, sizeof(global_hostname), "%s-%02x%02x%02x", 
+             CONFIG_IDF_TARGET, mac[3], mac[4], mac[5]);
+
+    // 3. 设置 DHCP 主机名
+    esp_err_t err = esp_netif_set_hostname(netif, global_hostname);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Successfully set hostname to: %s", global_hostname);
+    } else {
+        ESP_LOGE(TAG, "Failed to set hostname");
+    }
+}
 
 void time_sync_notification_cb(struct timeval *tv) {
     sntp_sync_status_t status = esp_sntp_get_sync_status();
@@ -74,7 +97,10 @@ static void ntp_time_init(void)
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
 
     esp_sntp_setservername(0, "time.apple.com");
-    esp_sntp_servermode_dhcp(1);
+    esp_sntp_setservername(2, "time.google.com");
+    esp_sntp_setservername(3, "time.windows.com");
+
+    //esp_sntp_servermode_dhcp(1);
 
     sntp_set_time_sync_notification_cb(time_sync_notification_cb);
 
@@ -106,6 +132,14 @@ static void ntp_time_init(void)
              timeinfo.tm_sec);
 }
 
+#if CONFIG_PROVISION_METHOD_BLE
+static bool s_provisioning_started = false;
+// 前置声明
+static void start_ble_provisioning(void);
+
+#include "network_provisioning/manager.h"
+#include "network_provisioning/scheme_ble.h"
+
 // 配网事件回调函数
 static void wifi_prov_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == NETWORK_PROV_EVENT) {
@@ -118,7 +152,6 @@ static void wifi_prov_event_handler(void* arg, esp_event_base_t event_base, int3
                 break;
             case NETWORK_PROV_WIFI_CRED_FAIL:
                 ESP_LOGE(TAG, "❌ 给定的 Wi-Fi 凭据验证失败 (密码错误或找不到SSID)！重置配网状态等待重新输入...");
-                // 清除错误状态，允许用户在 App 端重新输入密码
                 network_prov_mgr_reset_wifi_sm_state_on_failure();
                 break;
             case NETWORK_PROV_WIFI_CRED_SUCCESS:
@@ -126,7 +159,6 @@ static void wifi_prov_event_handler(void* arg, esp_event_base_t event_base, int3
                 break;
             case NETWORK_PROV_END:
                 ESP_LOGI(TAG, "🎉 配网流程结束，释放蓝牙底层资源");
-                // 释放管理器，释放 BLE 内存
                 network_prov_mgr_deinit();
                 s_provisioning_started = false;
                 break;
@@ -136,69 +168,6 @@ static void wifi_prov_event_handler(void* arg, esp_event_base_t event_base, int3
     }
 }
 
-// 常规 Wi-Fi 事件回调
-static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        // 只有在非配网模式下，开机才主动发起连接。
-        // 防止配网模式下拿着空的 SSID 去连路由器。
-        if (!s_provisioning_started) {
-            esp_wifi_connect();
-        }
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-#if CONFIG_ENABLE_LOG_SERVICE
-        log_service_set_ready(false);
-#endif
-        
-        // 如果配网服务正在运行，由 network_prov_mgr 内部接管重连尝试，不手动调用 esp_wifi_connect
-        if (s_provisioning_started) {
-            return;
-        }
-
-        if (s_retry_num < MAX_RETRY_WIFI) {
-            s_retry_num++;
-            ESP_LOGW(TAG, "Wi-Fi 断开连接，正在重连... (%d/%d)", s_retry_num, MAX_RETRY_WIFI);
-            esp_wifi_connect(); 
-        } else {
-            ESP_LOGE(TAG, "连续 %d 次连接失败，触发蓝牙配网模式！", MAX_RETRY_WIFI);
-            start_ble_provisioning();
-        }
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "✅ 成功获取局域网 IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        xEventGroupSetBits(s_net_event_group, NET_READY_BIT);
-        s_retry_num = 0; // 重置重试计数器
-#if CONFIG_ENABLE_LOG_SERVICE
-        log_service_set_ready(true);
-#endif
-
-        static bool s_web_started = false;
-        if (!s_web_started) {
-            web_server_start();
-            s_web_started = true;
-        }
-
-        static bool s_ntp_started = false;
-        if (!s_ntp_started) {
-            ntp_time_init();
-            s_ntp_started = true;
-        }
-
-        static bool s_boot_push_sent = false;
-        if (!s_boot_push_sent) {
-            s_boot_push_sent = true;
-            char push_msg[256];
-            snprintf(push_msg, sizeof(push_msg), 
-                     "✅ SMS网关已成功启动！\n"
-                     "🌐 局域网管理地址: http://" IPSTR "\n"
-                     "⏰ 系统时间已转入后台同步。", 
-                     IP2STR(&event->ip_info.ip));
-            
-            push_service_send_now("🚀 设备启动通知", push_msg); 
-        }
-    }
-}
-
-// (venv) PS E:\SourceTreeProjects\esp32c3-sms-gateway> python E:\SourceTreeProjects\esp32c3-sms-gateway\managed_components\espressif__network_provisioning\tool\esp_prov\esp_prov.py --transport ble --sec_ver 2 --sec2_gen_cred --sec2_username prov --sec2_pwd 20260529
 // ==== Salt-verifier for security scheme 2 (SRP6a) ====
 static const char sec2_salt[] = {
     0xa4, 0xc1, 0x61, 0x41, 0x5e, 0xb3, 0x9d, 0xa8, 0x57, 0xb8, 0xa2, 0x35, 0xd1, 0x5b, 0x63, 0x19
@@ -247,7 +216,6 @@ static void start_ble_provisioning(void) {
     esp_wifi_get_mac(WIFI_IF_STA, mac);
     snprintf(service_name, sizeof(service_name), "PROV_%02X%02X%02X", mac[3], mac[4], mac[5]);
     
-    // 组装 SECURITY_2 专属结构体
     network_prov_security2_params_t sec2_params = {
         .salt = sec2_salt,
         .salt_len = sizeof(sec2_salt),
@@ -255,7 +223,6 @@ static void start_ble_provisioning(void) {
         .verifier_len = sizeof(sec2_verifier)
     };
 
-    // 传入配网管理器
     network_prov_security_t security = NETWORK_PROV_SECURITY_2;
     ESP_ERROR_CHECK(network_prov_mgr_start_provisioning(security, (const void *)&sec2_params, service_name, NULL));
     
@@ -266,6 +233,80 @@ static void start_ble_provisioning(void) {
     ESP_LOGI(TAG, "🔑 验证 PIN 码: %s", PROV_PIN);
     ESP_LOGI(TAG, "=================================================");
 }
+#endif // CONFIG_PROVISION_METHOD_BLE
+
+// 常规 Wi-Fi 事件回调
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        // 蓝牙模式下防止配网时连不存在的路由，写死模式下直接开连
+#if CONFIG_PROVISION_METHOD_BLE
+        if (!s_provisioning_started) {
+            esp_wifi_connect();
+        }
+#elif CONFIG_PROVISION_METHOD_HARDCODED
+        esp_wifi_connect();
+#endif
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+#if CONFIG_ENABLE_LOG_SERVICE
+        log_service_set_ready(false);
+#endif
+        
+#if CONFIG_PROVISION_METHOD_BLE
+        // 如果是蓝牙配网模式
+        if (s_provisioning_started) {
+            return; // 正在配网中，由内部处理
+        }
+        if (s_retry_num < MAX_RETRY_WIFI) {
+            s_retry_num++;
+            ESP_LOGW(TAG, "Wi-Fi 断开连接，正在重连... (%d/%d)", s_retry_num, MAX_RETRY_WIFI);
+            esp_wifi_connect(); 
+        } else {
+            ESP_LOGE(TAG, "连续 %d 次连接失败，触发蓝牙配网模式！", MAX_RETRY_WIFI);
+            start_ble_provisioning();
+        }
+#elif CONFIG_PROVISION_METHOD_HARDCODED
+        // 如果是写死密码模式，无限重连即可（通常不用设置最大重试次数触发其他机制）
+        ESP_LOGW(TAG, "Wi-Fi 断开连接，正在尝试重连...");
+        esp_wifi_connect(); 
+#endif
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "✅ 成功获取局域网 IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        xEventGroupSetBits(s_net_event_group, NET_READY_BIT);
+        s_retry_num = 0; // 重置重试计数器
+#if CONFIG_ENABLE_LOG_SERVICE
+        log_service_set_ready(true);
+#endif
+        // WiFi 连接成功后最后打印一条告别日志，然后关闭串口输出
+        ESP_LOGI(TAG, "WiFi 已连接，串口日志即将静音");
+        esp_log_level_set("*", ESP_LOG_NONE);
+
+        static bool s_web_started = false;
+        if (!s_web_started) {
+            web_server_start();
+            s_web_started = true;
+        }
+
+        static bool s_ntp_started = false;
+        if (!s_ntp_started) {
+            ntp_time_init();
+            s_ntp_started = true;
+        }
+
+        static bool s_boot_push_sent = false;
+        if (!s_boot_push_sent) {
+            s_boot_push_sent = true;
+            char push_msg[256];
+            snprintf(push_msg, sizeof(push_msg), 
+                     "✅ SMS网关已成功启动！\n"
+                     "🌐 局域网管理地址: http://" IPSTR "\n"
+                     "⏰ 系统时间已转入后台同步。", 
+                     IP2STR(&event->ip_info.ip));
+            
+            push_service_send_now("🚀 设备启动通知", push_msg); 
+        }
+    }
+}
 
 static void wifi_init_sta(void) {
     esp_err_t netif_err = esp_netif_init();
@@ -273,13 +314,13 @@ static void wifi_init_sta(void) {
         ESP_ERROR_CHECK(netif_err);
     }
 
-    // 宽容模式创建事件循环 (如果已经被 Modem 创建了，就不报错)
     esp_err_t event_err = esp_event_loop_create_default();
     if (event_err != ESP_OK && event_err != ESP_ERR_INVALID_STATE) {
         ESP_ERROR_CHECK(event_err);
     }
 
-    esp_netif_create_default_wifi_sta();
+    esp_netif_t *netif = esp_netif_create_default_wifi_sta();
+    set_unique_hostname(netif);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -287,29 +328,46 @@ static void wifi_init_sta(void) {
     // 注册常规网络事件
     esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL);
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL);
-    // 注册配网生命周期事件
+    
+#if CONFIG_PROVISION_METHOD_BLE
+    // 仅在蓝牙配网模式下，注册配网生命周期事件
     esp_event_handler_instance_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, &wifi_prov_event_handler, NULL, NULL);
+#endif
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    
-    // 叠加 WPA3 配置
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+
+#if CONFIG_PROVISION_METHOD_HARDCODED
+    // ==========================================
+    // 模式 A: 使用 Kconfig 选项中写死的凭据
+    // ==========================================
+    ESP_LOGI(TAG, "使用硬编码 Wi-Fi 凭证 (SSID: %s)", CONFIG_WIFI_SSID);
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = CONFIG_WIFI_SSID,
+            .password = CONFIG_WIFI_PASSWORD,
+            .threshold.authmode = WIFI_AUTH_WPA2_WPA3_PSK,
+            .pmf_cfg.capable = true,
+            .pmf_cfg.required = false,
+            .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+#elif CONFIG_PROVISION_METHOD_BLE
+    // ==========================================
+    // 模式 B: 使用蓝牙配网
+    // ==========================================
     wifi_config_t wifi_config;
-    // 先获取 ESP 底层 NVS 中保存的配置（保留原有的 SSID 和 Password）
     esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
     
-    // 在原有配置基础上，叠加 WPA3 与 PMF 的安全策略
     wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_WPA3_PSK;
     wifi_config.sta.pmf_cfg.capable = true;
     wifi_config.sta.pmf_cfg.required = false;
     wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
-    
-    // 将安全配置写回底层
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
 
-
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
-
-    // 初始化配网管理器，仅仅是为了检查是否已有凭据
     bool provisioned = false;
     network_prov_mgr_config_t config = {
         .scheme = network_prov_scheme_ble,
@@ -317,8 +375,6 @@ static void wifi_init_sta(void) {
     };
     ESP_ERROR_CHECK(network_prov_mgr_init(config));
     ESP_ERROR_CHECK(network_prov_mgr_is_wifi_provisioned(&provisioned));
-
-    // 检查完毕后，立即注销管理器！
     network_prov_mgr_deinit(); 
 
     if (provisioned) {
@@ -327,10 +383,9 @@ static void wifi_init_sta(void) {
     } else {
         ESP_LOGW(TAG, "⚠️ 未检测到 Wi-Fi 凭证，初次启动直接进入蓝牙配网模式！");
         ESP_ERROR_CHECK(esp_wifi_start());
-        
-        // 这里的调用现在是绝对安全的
         start_ble_provisioning();
     }
+#endif
 }
 
 static void modem_net_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
@@ -405,6 +460,19 @@ void app_main(void) {
             vTaskDelay(pdMS_TO_TICKS(10000));
         }
     }
+    
+    // ==========================================
+    // eSIM 管理器初始化 (检测模组是否支持 eUICC)
+    // ==========================================
+    esp_err_t esim_err = esim_manager_init();
+    if (esim_err == ESP_OK) {
+        ESP_LOGI(TAG, "✅ 模组支持 eSIM (eUICC) 功能");
+    } else if (esim_err == ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGW(TAG, "ℹ️ 模组不支持 eSIM: %s (可能是实体SIM卡)", esim_manager_get_last_error());
+    } else {
+        ESP_LOGE(TAG, "❌ eSIM 检测失败: %s", esim_manager_get_last_error());
+    }
+    
     // 初始化推送服务组件 (先建好队列，等网络通了才能发)
     push_service_init();
     // 启动短信处理引擎 (PDU 队列监听)

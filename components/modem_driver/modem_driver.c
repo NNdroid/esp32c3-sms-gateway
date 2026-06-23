@@ -813,12 +813,13 @@ esp_err_t modem_get_all_sms_indices(int* out_indices, int max_count, int* out_co
     if (!out_indices || !out_count || max_count <= 0) return ESP_ERR_INVALID_ARG;
     *out_count = 0;
 
-    // 由于 AT+CMGL=4 可能会返回多条短信 PDU，使用固定静态缓冲区避免运行时分配
-    static char resp_buf[4096];
-    memset(resp_buf, 0, sizeof(resp_buf));
+    // 原static 4KB缓冲区改为动态分配，函数返回后释放，不常驻内存
+    char *resp_buf = (char *)malloc(2048);
+    if (!resp_buf) return ESP_ERR_NO_MEM;
+    memset(resp_buf, 0, 2048);
 
     // AT+CMGL=4 代表列出所有 (已读、未读、未发送等)
-    esp_err_t err = modem_send_at_command("AT+CMGL=4", resp_buf, sizeof(resp_buf), 5000);
+    esp_err_t err = modem_send_at_command("AT+CMGL=4", resp_buf, 2048, 5000);
     if (err == ESP_OK) {
         char* p = resp_buf;
         // 寻找所有 "+CMGL:" 开头的行
@@ -827,16 +828,17 @@ esp_err_t modem_get_all_sms_indices(int* out_indices, int max_count, int* out_co
             while (*p == ' ') p++; // 跳过可能存在的空格
             
             int idx = atoi(p); // 提取逗号前的索引数字
-            if (idx >= 0) {
+                        if (idx >= 0) {
                 out_indices[*out_count] = idx;
                 (*out_count)++;
             }
         }
     }
+    free(resp_buf);
     return err;
 }
 
-// ================= 驱动初始化 =================
+/* ───────────────────── 驱动初始化 ───────────────────── */
 esp_err_t modem_driver_init(void) {
     at_mutex = xSemaphoreCreateMutex();
     at_event_group = xEventGroupCreate();
@@ -882,7 +884,7 @@ esp_err_t modem_driver_init(void) {
     gpio_set_level(MODEM_EN_PIN, 1); 
     vTaskDelay(pdMS_TO_TICKS(3000)); 
 
-    xTaskCreate(modem_event_task, "modem_event_task", 4096, NULL, 6, NULL);
+    xTaskCreate(modem_event_task, "modem_event_task", 6144, NULL, 6, NULL);
     xTaskCreate(modem_at_worker_task, "modem_at_worker", 4096, NULL, 5, NULL);
 
     ESP_LOGI(TAG, "正在与模组握手并查询型号...");

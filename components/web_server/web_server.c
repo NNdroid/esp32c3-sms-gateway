@@ -2,6 +2,7 @@
 #include "sdkconfig.h"
 #include "config_manager.h"
 #include "modem_driver.h"
+#include "esim_manager.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "log_service.h"
@@ -71,6 +72,7 @@ extern const uint8_t tools_html_start[] asm("_binary_tools_html_start");
 extern const uint8_t tools_html_end[]   asm("_binary_tools_html_end");
 extern const uint8_t ota_html_start[]   asm("_binary_ota_html_start");
 extern const uint8_t ota_html_end[]     asm("_binary_ota_html_end");
+// eSIM 管理已合并到 tools.html 中
 
 // ================= 工具函数 =================
 static void url_decode(char *dst, const char *src) {
@@ -1107,6 +1109,185 @@ static esp_err_t handleATCommand(httpd_req_t *req) {
     return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
 
+// ================= eSIM 管理 API =================
+static esp_err_t handleEsimStatus(httpd_req_t *req) {
+    if (!check_cookie_auth(req)) return httpd_resp_send_401(req);
+    
+    char json[512];
+    snprintf(json, sizeof(json),
+        "{\"supported\":%s,\"error\":\"%s\"}",
+        esim_manager_is_supported() ? "true" : "false",
+        esim_manager_get_last_error());
+    
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t handleEsimEid(httpd_req_t *req) {
+    if (!check_cookie_auth(req)) return httpd_resp_send_401(req);
+    if (!esim_manager_is_supported()) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"success\":false,\"message\":\"模组不支持 eSIM\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    
+    char eid[64] = {0};
+    esp_err_t err = esim_manager_get_eid(eid, sizeof(eid));
+    char json[256];
+    if (err == ESP_OK) {
+        snprintf(json, sizeof(json), "{\"success\":true,\"eid\":\"%s\"}", eid);
+    } else {
+        snprintf(json, sizeof(json), "{\"success\":false,\"message\":\"获取EID失败: %s\"}", esim_manager_get_last_error());
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t handleEsimProfiles(httpd_req_t *req) {
+    if (!check_cookie_auth(req)) return httpd_resp_send_401(req);
+    if (!esim_manager_is_supported()) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"success\":false,\"message\":\"模组不支持 eSIM\",\"profiles\":[]}", HTTPD_RESP_USE_STRLEN);
+    }
+    
+    esim_profile_t profiles[ESIM_MAX_PROFILES];
+    int count = 0;
+    esp_err_t err = esim_manager_get_profiles(profiles, ESIM_MAX_PROFILES, &count);
+    
+    // 分配足够大的 JSON 缓冲
+    char *json = malloc(4096);
+    if (!json) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"success\":false,\"message\":\"内存不足\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    
+    int pos = 0;
+    if (err == ESP_OK) {
+        pos = snprintf(json, 4096, "{\"success\":true,\"count\":%d,\"profiles\":[", count);
+        for (int i = 0; i < count && pos < 4096; i++) {
+            const char *state_str = "unknown";
+            if (profiles[i].state == ESIM_PROFILE_ENABLED) state_str = "enabled";
+            else if (profiles[i].state == ESIM_PROFILE_DISABLED) state_str = "disabled";
+            
+            int written = snprintf(json + pos, 4096 - pos,
+                "{\"index\":%d,\"iccid\":\"%s\",\"aid\":\"%s\",\"state\":\"%s\","
+                "\"stateCode\":%d,\"nickname\":\"%s\",\"operator\":\"%s\","
+                "\"profileName\":\"%s\",\"class\":%d}%s",
+                i,
+                profiles[i].iccid, profiles[i].isdpAid, state_str,
+                (int)profiles[i].state,
+                profiles[i].nickname, profiles[i].serviceProviderName,
+                profiles[i].profileName, profiles[i].profileClass,
+                (i < count - 1) ? "," : "");
+            if (written > 0) pos += written;
+        }
+        if (pos < 4096) {
+            pos += snprintf(json + pos, 4096 - pos, "],\"error\":\"\"}");
+        }
+    } else {
+        pos = snprintf(json, 4096, "{\"success\":false,\"message\":\"%s\",\"profiles\":[]}", esim_manager_get_last_error());
+    }
+    
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t res = httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+    free(json);
+    return res;
+}
+
+static esp_err_t handleEsimSwitch(httpd_req_t *req) {
+    if (!check_cookie_auth(req)) return httpd_resp_send_401(req);
+    if (!esim_manager_is_supported()) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"success\":false,\"message\":\"模组不支持 eSIM\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    
+    char body[256] = {0};
+    if (!read_request_body_safe(req, body, sizeof(body))) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"success\":false,\"message\":\"请求体为空\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    
+    char iccid[64] = {0};
+    char action[16] = {0};
+    json_get_string_value(body, "iccid", iccid, sizeof(iccid));
+    json_get_string_value(body, "action", action, sizeof(action));
+    
+        if (iccid[0] == '\0') {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"success\":false,\"message\":\"缺少 ICCID 参数\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    
+    // 清理 ICCID 中的空白字符
+    char *src = iccid, *dst = iccid;
+    while (*src) {
+        if (*src != ' ' && *src != '\r' && *src != '\n' && *src != '\t') {
+            *dst++ = *src;
+        }
+        src++;
+    }
+    *dst = '\0';
+    
+    ESP_LOGI("WEB_ESIM", "switch action=%s iccid='%s'", action, iccid);
+    
+    esp_err_t err = ESP_FAIL;
+    const char *action_desc = "未知操作";
+    
+    if (strcmp(action, "enable") == 0 || strcmp(action, "switch") == 0) {
+        action_desc = "启用/切换";
+        err = esim_manager_switch_profile(iccid);
+    } else if (strcmp(action, "disable") == 0) {
+        action_desc = "禁用";
+        err = esim_manager_disable_profile(iccid, true);
+    } else if (strcmp(action, "delete") == 0) {
+        action_desc = "删除";
+        err = esim_manager_delete_profile(iccid);
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_send(req, "{\"success\":false,\"message\":\"未知操作类型\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    
+    char json[512];
+    if (err == ESP_OK) {
+        snprintf(json, sizeof(json), "{\"success\":true,\"message\":\"Profile %s 成功\"}", action_desc);
+    } else if (err == ESP_ERR_ESIM_CAT_BUSY) {
+        snprintf(json, sizeof(json), "{\"success\":false,\"message\":\"操作被模组拒绝(CAT忙)，请稍后重试\",\"catBusy\":true}");
+    } else {
+        snprintf(json, sizeof(json), "{\"success\":false,\"message\":\"操作失败: %s\"}", esim_manager_get_last_error());
+    }
+    
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t handleEsimCmd(httpd_req_t *req) {
+    if (!check_cookie_auth(req)) return httpd_resp_send_401(req);
+    
+    char body[256] = {0};
+    if (!read_request_body_safe(req, body, sizeof(body))) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"success\":false,\"message\":\"请求体为空\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    
+    char cmd[32] = {0};
+    json_get_string_value(body, "cmd", cmd, sizeof(cmd));
+    
+    // 不需要参数的命令直接执行
+    char json[1024] = {0};
+    if (strcmp(cmd, "init") == 0) {
+        esp_err_t err = esim_manager_init();
+        snprintf(json, sizeof(json),
+            "{\"success\":%s,\"supported\":%s,\"message\":\"%s\"}",
+            err == ESP_OK ? "true" : "false",
+            esim_manager_is_supported() ? "true" : "false",
+            err == ESP_OK ? "eSIM 重新初始化成功" : esim_manager_get_last_error());
+    } else {
+        snprintf(json, sizeof(json), "{\"success\":false,\"message\":\"未知命令\"}");
+    }
+    
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
+
 // ================= 服务注册与启动 =================
 #define REG_URI(path, meth, func) do { \
     httpd_uri_t uri = { .uri = path, .method = meth, .handler = func, .user_ctx = NULL }; \
@@ -1127,8 +1308,8 @@ esp_err_t web_server_start(void) {
     snprintf(session_token, sizeof(session_token), "%08X%08X", (unsigned int)esp_random(), (unsigned int)esp_random());
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 25;
-    config.stack_size = 8192;
+    config.max_uri_handlers = 32;
+    config.stack_size = 12288;
     config.max_open_sockets = 4;
     
     if (httpd_start(&server, &config) == ESP_OK) {
@@ -1158,6 +1339,14 @@ esp_err_t web_server_start(void) {
         REG_URI("/api/reboot", HTTP_POST, handleReboot);
         REG_URI("/api/update", HTTP_POST, handleApiUpdate);
         REG_URI("/api/resetnetwork", HTTP_POST, handleResetNetwork);
+
+        // eSIM 管理接口
+        REG_URI("/api/esim/status", HTTP_GET, handleEsimStatus);
+        REG_URI("/api/esim/eid", HTTP_GET, handleEsimEid);
+        REG_URI("/api/esim/profiles", HTTP_GET, handleEsimProfiles);
+        REG_URI("/api/esim/switch", HTTP_POST, handleEsimSwitch);
+        REG_URI("/api/esim/cmd", HTTP_POST, handleEsimCmd);
+        REG_URI("/esim", HTTP_GET, handleToolsPage);  // eSIM 管理页复用工具页
 
         ESP_LOGI(TAG, "Web 服务已启动，端口: %d", config.server_port);
         return ESP_OK;
